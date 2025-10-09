@@ -75,11 +75,13 @@ async function runWithConcurrency(items, limit, worker) {
   return results;
 }
 
-export async function searchPirateBay(query, _options = {}) {
+export async function searchPirateBay(query, options = {}) {
   console.log(`[PirateBay] Searching (API) for: ${query}`);
   try {
     const q = String(query || '').trim();
     if (!q) return [];
+    
+    const allowSeries = options.allowSeries || false;
 
     // apibay.org JSON search
     const { data } = await http.get('https://apibay.org/q.php', {
@@ -118,10 +120,11 @@ export async function searchPirateBay(query, _options = {}) {
         quality: parseQualityFromTitle(item.name || '')
       }))
       .filter((r) => r.title && r.infoHash)
-      // tighten: require all query words to appear in title, and drop common TV episode patterns
+      // tighten: require all query words to appear in title, and conditionally drop TV episode patterns
       .filter((r) => {
         const t = norm(r.title);
-        if (isTvPattern(r.title)) return false;
+        // Only filter out TV patterns if allowSeries is false (movie search)
+        if (!allowSeries && isTvPattern(r.title)) return false;
         // require all meaningful tokens to appear in title
         return tokens.every(w => t.includes(w));
       });

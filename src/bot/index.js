@@ -302,11 +302,34 @@ Ready to find movies? Just type any movie name! 🚀`;
     }
   });
 
+  // Series search command
+  bot.onText(/^\/series\s+(.+)$/, async (msg, match) => {
+    const chatId = msg.chat.id;
+    const query = match[1].trim();
+    
+    if (!query) {
+      return bot.sendMessage(chatId, '❌ Please provide a series name.\n\nExample: `/series Game of Thrones`', {
+        parse_mode: 'Markdown'
+      });
+    }
+
+    try {
+      await limiter.consume(String(chatId), 1);
+    } catch {
+      return bot.sendMessage(chatId, 'Rate limit exceeded. Try again in a minute.');
+    }
+
+    console.log(`[DEBUG] Series search triggered for: ${query}`);
+    await handleSeriesSearch(chatId, query);
+  });
+
   // ephemeral stores
   // - language selection (token -> data)
   const selectionStore = new Map();
   // - pending downloads for YTS/PirateBay (token -> { title, quality, url, size })
   const downloadStore = new Map();
+  // - season selection for series (token -> { query, seasonGroups, createdAt, chatId })
+  const seasonStore = new Map();
 
   const handleSearch = async (chatId, query) => {
     const q = (query || '').trim();
@@ -543,6 +566,86 @@ Ready to find movies? Just type any movie name! 🚀`;
         }
       } catch {}
       bot.sendMessage(chatId, 'Search failed. Please try again later.');
+    }
+  };
+
+  const handleSeriesSearch = async (chatId, query) => {
+    const q = (query || '').trim();
+    if (!q) return bot.sendMessage(chatId, 'Provide a series name.');
+    
+    try {
+      logger.info('Starting series search', { query: q });
+      const searchingMsg = await bot.sendMessage(chatId, `Searching for series: ${q}...`);
+      await bot.sendChatAction(chatId, 'typing');
+
+      // Import PirateBay for series search
+      const { searchPirateBay } = await import('../piratebay.js');
+      
+      // Search only PirateBay with allowSeries=true
+      const results = await searchPirateBay(q, { allowSeries: true });
+      
+      logger.info('Series search completed', { query: q, count: results.length });
+      
+      if (!results.length) {
+        try { await bot.editMessageText(' ', { chat_id: chatId, message_id: searchingMsg.message_id }); } catch {}
+        try { await bot.deleteMessage(chatId, searchingMsg.message_id); } catch {}
+        return bot.sendMessage(chatId, `No series found for "${q}".`);
+      }
+
+      // Group results by season
+      const seasonGroups = new Map();
+      for (const result of results) {
+        const title = result.title || '';
+        const seasonMatch = title.match(/S(\d{1,2})/i);
+        const season = seasonMatch ? `Season ${seasonMatch[1]}` : 'Unknown Season';
+        
+        if (!seasonGroups.has(season)) {
+          seasonGroups.set(season, []);
+        }
+        seasonGroups.get(season).push(result);
+      }
+
+      // Create season buttons
+      const keyboard = { inline_keyboard: [] };
+      const tokenId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      
+      // Store season data for callback handling
+      seasonStore.set(tokenId, { query: q, seasonGroups, createdAt: Date.now(), chatId });
+      setTimeout(() => seasonStore.delete(tokenId), 15 * 60 * 1000);
+
+      // Add season buttons
+      const sortedSeasons = Array.from(seasonGroups.keys()).sort((a, b) => {
+        if (a === 'Unknown Season') return 1;
+        if (b === 'Unknown Season') return -1;
+        return a.localeCompare(b);
+      });
+
+      for (const season of sortedSeasons) {
+        const episodeCount = seasonGroups.get(season).length;
+        keyboard.inline_keyboard.push([
+          { text: `📺 ${season} (${episodeCount} episodes)`, callback_data: `season:${tokenId}:${season}` }
+        ]);
+      }
+
+      const msgText = `🎬 **Series Found: ${q}**\n\nSelect a season to view episodes:`;
+      
+      try { await bot.editMessageText(' ', { chat_id: chatId, message_id: searchingMsg.message_id }); } catch {}
+      try { await bot.deleteMessage(chatId, searchingMsg.message_id); } catch {}
+      
+      await bot.sendMessage(chatId, msgText, { 
+        parse_mode: 'Markdown', 
+        reply_markup: keyboard 
+      });
+
+    } catch (err) {
+      logger.error('Series search error', { err: err?.stack || String(err) });
+      try {
+        if (searchingMsg?.message_id) {
+          try { await bot.editMessageText(' ', { chat_id: chatId, message_id: searchingMsg.message_id }); } catch {}
+          await bot.deleteMessage(chatId, searchingMsg.message_id);
+        }
+      } catch {}
+      bot.sendMessage(chatId, 'Series search failed. Please try again later.');
     }
   };
 
@@ -1276,6 +1379,57 @@ Ready to find movies? Just type any movie name! 🚀`;
           ).catch(()=>{});
         }
       } catch {}
+    }
+    
+    // Handle season selection for series
+    if (data.startsWith('season:')) {
+      const chatId = cb.message?.chat?.id;
+      const [_, tokenId, season] = data.split(':');
+      if (!tokenId || !season) return;
+      
+      try {
+        await limiter.consume(String(chatId), 1);
+      } catch {
+        return bot.answerCallbackQuery(cb.id, { text: 'Rate limited. Try again shortly.' });
+      }
+      
+      const entry = seasonStore.get(tokenId);
+      if (!entry) {
+        return bot.answerCallbackQuery(cb.id, { text: 'Selection expired. Please search again.' });
+      }
+      
+      const episodes = entry.seasonGroups.get(season) || [];
+      if (!episodes.length) {
+        return bot.answerCallbackQuery(cb.id, { text: 'No episodes found for this season.' });
+      }
+      
+      await bot.answerCallbackQuery(cb.id, { text: `Showing ${season}` });
+      
+      // Sort episodes by episode number
+      const sortedEpisodes = episodes.sort((a, b) => {
+        const aMatch = a.title.match(/E(\d{1,2})/i);
+        const bMatch = b.title.match(/E(\d{1,2})/i);
+        const aEp = aMatch ? parseInt(aMatch[1]) : 999;
+        const bEp = bMatch ? parseInt(bMatch[1]) : 999;
+        return aEp - bEp;
+      });
+      
+      // Create episode list
+      const episodeLines = sortedEpisodes.slice(0, 10).map((ep, idx) => {
+        const title = ep.title || '';
+        const quality = ep.quality || 'Unknown';
+        const seeders = ep.seeders || 0;
+        const size = ep.size ? `${(ep.size / (1024 * 1024 * 1024)).toFixed(1)}GB` : 'Unknown';
+        
+        return `${idx + 1}. ${title}\n   ${quality} • ${seeders} seeders • ${size}`;
+      });
+      
+      const msgText = `📺 **${season} - ${entry.query}**\n\n${episodeLines.join('\n\n')}${sortedEpisodes.length > 10 ? `\n\n... and ${sortedEpisodes.length - 10} more episodes` : ''}`;
+      
+      await bot.sendMessage(chatId, msgText, { 
+        parse_mode: 'Markdown',
+        disable_web_page_preview: true 
+      });
     }
   });
 
