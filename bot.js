@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { logger } from './src/logger.js';
 import { startBot } from './src/bot/index.js';
 import { startHealthServer } from './src/health.js';
