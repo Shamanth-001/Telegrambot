@@ -330,6 +330,8 @@ Ready to find movies? Just type any movie name! 🚀`;
   const downloadStore = new Map();
   // - season selection for series (token -> { query, seasonGroups, createdAt, chatId })
   const seasonStore = new Map();
+  // - episode downloads for series (token -> { episodes, season, query, createdAt, chatId })
+  const episodeStore = new Map();
 
   const handleSearch = async (chatId, query) => {
     const q = (query || '').trim();
@@ -581,8 +583,8 @@ Ready to find movies? Just type any movie name! 🚀`;
       // Import PirateBay for series search
       const { searchPirateBay } = await import('../piratebay.js');
       
-      // Search only PirateBay with allowSeries=true
-      const results = await searchPirateBay(q, { allowSeries: true });
+      // Search only PirateBay with allowSeries=true and multiPage=true
+      const results = await searchPirateBay(q, { allowSeries: true, multiPage: true });
       
       logger.info('Series search completed', { query: q, count: results.length });
       
@@ -592,12 +594,27 @@ Ready to find movies? Just type any movie name! 🚀`;
         return bot.sendMessage(chatId, `No series found for "${q}".`);
       }
 
-      // Group results by season
+      // Group results by season with better episode detection
       const seasonGroups = new Map();
       for (const result of results) {
         const title = result.title || '';
+        
+        // Better episode pattern detection
         const seasonMatch = title.match(/S(\d{1,2})/i);
-        const season = seasonMatch ? `Season ${seasonMatch[1]}` : 'Unknown Season';
+        const episodeMatch = title.match(/E(\d{1,2})/i);
+        
+        let season = 'Unknown Season';
+        if (seasonMatch) {
+          const seasonNum = seasonMatch[1];
+          season = `Season ${seasonNum}`;
+          
+          // Also check for complete season packs
+          if (title.toLowerCase().includes('complete') || 
+              title.toLowerCase().includes('full season') ||
+              title.toLowerCase().includes('season pack')) {
+            season = `Season ${seasonNum} (Complete)`;
+          }
+        }
         
         if (!seasonGroups.has(season)) {
           seasonGroups.set(season, []);
@@ -1414,7 +1431,7 @@ Ready to find movies? Just type any movie name! 🚀`;
         return aEp - bEp;
       });
       
-      // Create episode list
+      // Create episode list with download buttons
       const episodeLines = sortedEpisodes.slice(0, 10).map((ep, idx) => {
         const title = ep.title || '';
         const quality = ep.quality || 'Unknown';
@@ -1426,10 +1443,119 @@ Ready to find movies? Just type any movie name! 🚀`;
       
       const msgText = `📺 **${season} - ${entry.query}**\n\n${episodeLines.join('\n\n')}${sortedEpisodes.length > 10 ? `\n\n... and ${sortedEpisodes.length - 10} more episodes` : ''}`;
       
+      // Create download buttons for each episode
+      const downloadKeyboard = { inline_keyboard: [] };
+      const episodeTokenId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      
+      // Store episode data for download callbacks
+      episodeStore.set(episodeTokenId, { 
+        episodes: sortedEpisodes, 
+        season, 
+        query: entry.query,
+        createdAt: Date.now(), 
+        chatId 
+      });
+      setTimeout(() => episodeStore.delete(episodeTokenId), 15 * 60 * 1000);
+      
+      // Add download buttons (max 8 episodes per row)
+      const episodesToShow = sortedEpisodes.slice(0, 8);
+      for (let i = 0; i < episodesToShow.length; i += 2) {
+        const row = [];
+        for (let j = 0; j < 2 && i + j < episodesToShow.length; j++) {
+          const ep = episodesToShow[i + j];
+          const epMatch = ep.title.match(/E(\d{1,2})/i);
+          const epNum = epMatch ? epMatch[1] : i + j + 1;
+          row.push({
+            text: `📁 E${epNum}`,
+            callback_data: `episode:${episodeTokenId}:${i + j}`
+          });
+        }
+        downloadKeyboard.inline_keyboard.push(row);
+      }
+      
+      // Add "Download All" button if there are multiple episodes
+      if (sortedEpisodes.length > 1) {
+        downloadKeyboard.inline_keyboard.push([
+          { text: `📦 Download All Episodes (${sortedEpisodes.length})`, callback_data: `download_all:${episodeTokenId}` }
+        ]);
+      }
+      
       await bot.sendMessage(chatId, msgText, { 
         parse_mode: 'Markdown',
-        disable_web_page_preview: true 
+        disable_web_page_preview: true,
+        reply_markup: downloadKeyboard
       });
+    }
+    
+    // Handle individual episode downloads
+    if (data.startsWith('episode:')) {
+      const chatId = cb.message?.chat?.id;
+      const [_, tokenId, episodeIndex] = data.split(':');
+      if (!tokenId || !episodeIndex) return;
+      
+      try {
+        await limiter.consume(String(chatId), 1);
+      } catch {
+        return bot.answerCallbackQuery(cb.id, { text: 'Rate limited. Try again shortly.' });
+      }
+      
+      const entry = episodeStore.get(tokenId);
+      if (!entry) {
+        return bot.answerCallbackQuery(cb.id, { text: 'Download expired. Search again.' });
+      }
+      
+      const episode = entry.episodes[parseInt(episodeIndex)];
+      if (!episode) {
+        return bot.answerCallbackQuery(cb.id, { text: 'Episode not found.' });
+      }
+      
+      await bot.answerCallbackQuery(cb.id, { text: `Sending ${episode.title}...` });
+      
+      // Send the torrent file
+      try {
+        const torrentUrl = `https://itorrents.org/torrent/${episode.infoHash}.torrent`;
+        await bot.sendMessage(chatId, `📁 **${episode.title}**\n\n🔗 [Download Torrent](${torrentUrl})`, {
+          parse_mode: 'Markdown',
+          disable_web_page_preview: true
+        });
+      } catch (error) {
+        await bot.sendMessage(chatId, `❌ Failed to get torrent for: ${episode.title}`);
+      }
+    }
+    
+    // Handle download all episodes
+    if (data.startsWith('download_all:')) {
+      const chatId = cb.message?.chat?.id;
+      const tokenId = data.split(':')[1];
+      if (!tokenId) return;
+      
+      try {
+        await limiter.consume(String(chatId), 1);
+      } catch {
+        return bot.answerCallbackQuery(cb.id, { text: 'Rate limited. Try again shortly.' });
+      }
+      
+      const entry = episodeStore.get(tokenId);
+      if (!entry) {
+        return bot.answerCallbackQuery(cb.id, { text: 'Download expired. Search again.' });
+      }
+      
+      await bot.answerCallbackQuery(cb.id, { text: `Sending ${entry.episodes.length} episodes...` });
+      
+      // Send all episodes
+      for (const episode of entry.episodes) {
+        try {
+          const torrentUrl = `https://itorrents.org/torrent/${episode.infoHash}.torrent`;
+          await bot.sendMessage(chatId, `📁 **${episode.title}**\n\n🔗 [Download Torrent](${torrentUrl})`, {
+            parse_mode: 'Markdown',
+            disable_web_page_preview: true
+          });
+          // Small delay between messages
+          await new Promise(resolve => setTimeout(resolve, 500));
+        } catch (error) {
+          console.log(`Failed to send episode: ${episode.title}`);
+        }
+      }
     }
   });
 

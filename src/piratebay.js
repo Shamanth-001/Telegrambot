@@ -75,6 +75,60 @@ async function runWithConcurrency(items, limit, worker) {
   return results;
 }
 
+// Helper function to search a single page
+async function searchPirateBayPage(query, page = 0, options = {}) {
+  const q = String(query || '').trim();
+  if (!q) return [];
+
+  const allowSeries = options.allowSeries || false;
+  
+  try {
+    // apibay.org JSON search with page parameter
+    const { data } = await http.get('https://apibay.org/q.php', {
+      params: { q, cat: 0, page },
+      timeout: 8000
+    });
+
+    if (!Array.isArray(data) || !data.length) {
+      return [];
+    }
+
+    // Process the data (same logic as before)
+    const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+    const tokens = q.toLowerCase().split(/\s+/).filter(Boolean);
+    const toNumber = (v) => {
+      const n = Number(v);
+      return Number.isFinite(n) && n >= 0 ? n : 0;
+    };
+
+    const isTvPattern = (t) => /\bS\d{1,2}E\d{1,2}\b/i.test(t);
+
+    const mapped = data
+      .map((item) => ({
+        title: item.name || null,
+        infoHash: item.info_hash || item.infoHash || null,
+        seeders: toNumber(item.seeders),
+        leechers: toNumber(item.leechers),
+        size: toNumber(item.size),
+        quality: parseQualityFromTitle(item.name || '')
+      }))
+      .filter((r) => r.title && r.infoHash)
+      // tighten: require all query words to appear in title, and conditionally drop TV episode patterns
+      .filter((r) => {
+        const t = norm(r.title);
+        // Only filter out TV patterns if allowSeries is false (movie search)
+        if (!allowSeries && isTvPattern(r.title)) return false;
+        // require all meaningful tokens to appear in title
+        return tokens.every(w => t.includes(w));
+      });
+
+    return mapped;
+  } catch (error) {
+    console.log(`[PirateBay] Page ${page} error:`, error.message);
+    return [];
+  }
+}
+
 export async function searchPirateBay(query, options = {}) {
   console.log(`[PirateBay] Searching (API) for: ${query}`);
   try {
@@ -82,8 +136,33 @@ export async function searchPirateBay(query, options = {}) {
     if (!q) return [];
     
     const allowSeries = options.allowSeries || false;
+    const multiPage = options.multiPage || false;
+    
+    if (multiPage && allowSeries) {
+      // Multi-page search for series
+      console.log(`[PirateBay] Multi-page search for series: ${q}`);
+      const pagePromises = [0, 1, 2, 3, 4].map(page => 
+        searchPirateBayPage(q, page, { allowSeries: true })
+      );
+      
+      const allPageResults = await Promise.all(pagePromises);
+      const allResults = allPageResults.flat();
+      
+      console.log(`[PirateBay] Multi-page search completed: ${allResults.length} total results`);
+      
+      // Remove duplicates based on infoHash
+      const seen = new Set();
+      const uniqueResults = allResults.filter(r => {
+        if (seen.has(r.infoHash)) return false;
+        seen.add(r.infoHash);
+        return true;
+      });
+      
+      console.log(`[PirateBay] After deduplication: ${uniqueResults.length} unique results`);
+      return uniqueResults;
+    }
 
-    // apibay.org JSON search
+    // Single page search (original behavior)
     const { data } = await http.get('https://apibay.org/q.php', {
       params: { q, cat: 0 },
       timeout: 8000
