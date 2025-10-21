@@ -1,4 +1,4 @@
-import { http } from './http.js';
+import { http } from './utils/http.js';
 
 export function extractInfoHashFromMagnet(magnetUrl) {
   try {

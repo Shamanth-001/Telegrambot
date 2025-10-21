@@ -14,7 +14,7 @@ for (const arg of argv) {
 
 // Accept BOT_TOKEN from env or CLI (CLI wins when provided)
 const BOT_TOKEN = (cliToken || process.env.BOT_TOKEN || '').trim() || undefined;
-const HEALTH_PORT = Number.isFinite(cliHealthPort) ? cliHealthPort : 3000;
+const HEALTH_PORT = Number.isFinite(cliHealthPort) ? cliHealthPort : Number(process.env.HEALTH_PORT || 3000);
 
 // Global error handlers
 process.on('unhandledRejection', (err) => console.error('[UNHANDLED]', err));

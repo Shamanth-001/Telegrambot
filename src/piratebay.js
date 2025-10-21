@@ -1,4 +1,4 @@
-import { http } from './http.js';
+import { http } from './utils/http.js';
 
 function parseQualityFromTitle(title) {
   if (!title) return null;
@@ -75,6 +75,120 @@ async function runWithConcurrency(items, limit, worker) {
   return results;
 }
 
+// Helper function to process PirateBay results
+async function processPirateBayResults(data, query, options = {}) {
+  const allowSeries = options.allowSeries || false;
+  
+  // Map raw items; then pick best-by-seeders per quality FIRST, resolve torrents only for those
+  const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9\s]/g,' ').replace(/\s+/g,' ').trim();
+  const qNorm = norm(query);
+  const rawWords = qNorm.split(' ').filter(Boolean);
+  // Build stable tokens: ignore 1-char junk; collapse sequences like "k g f" -> "kgf"
+  let tokens = rawWords.filter(w => w.length >= 2);
+  if (!tokens.length && rawWords.length >= 2 && rawWords.every(w => w.length === 1)) {
+    tokens = [rawWords.join('')];
+  }
+  // Always keep a numeric token like "1" if present
+  if (rawWords.some(w => /^(\d{1,4})$/.test(w))) {
+    const nums = rawWords.filter(w => /^(\d{1,4})$/.test(w));
+    nums.forEach(n => { if (!tokens.includes(n)) tokens.push(n); });
+  }
+  const isTvPattern = (t) => /\bS\d{1,2}E\d{1,2}\b/i.test(t);
+
+  const mapped = data
+    .map((item) => ({
+      title: item.name || null,
+      infoHash: item.info_hash || item.infoHash || null,
+      seeders: toNumber(item.seeders),
+      leechers: toNumber(item.leechers),
+      size: toNumber(item.size),
+      quality: parseQualityFromTitle(item.name || '')
+    }))
+    .filter((r) => r.title && r.infoHash)
+    // tighten: require all query words to appear in title, and conditionally drop TV episode patterns
+    .filter((r) => {
+      const t = norm(r.title);
+      // Only filter out TV patterns if allowSeries is false (movie search)
+      if (!allowSeries && isTvPattern(r.title)) return false;
+      // require all meaningful tokens to appear in title
+      return tokens.every(w => t.includes(w));
+    });
+
+  // Group by quality and pick the top-seeded within each quality; limit to desired qualities
+  const qualitiesOrder = ['2160p','1440p','1080p','720p','480p','360p'];
+  const byQualityRaw = new Map();
+  for (const r of mapped) {
+    const ql = r.quality || 'unknown';
+    const prev = byQualityRaw.get(ql);
+    if (!prev || (r.seeders || 0) > (prev.seeders || 0)) byQualityRaw.set(ql, r);
+  }
+  const selected = [];
+  for (const ql of qualitiesOrder) {
+    const item = byQualityRaw.get(ql);
+    if (item) selected.push(item);
+  }
+  // If we are missing common lower qualities, fetch fallback pages with explicit quality tokens
+  const need720 = !selected.some(r => (r.quality||'').includes('720'));
+  const need480 = !selected.some(r => (r.quality||'').includes('480'));
+  const fallbackQueries = [];
+  if (need720) fallbackQueries.push(`${query} 720p`);
+  if (need480) fallbackQueries.push(`${query} 480p`);
+  for (const fq of fallbackQueries) {
+    try {
+      const { data: fd } = await http.get('https://apibay.org/q.php', { params: { q: fq, cat: 0 }, timeout: 6000 });
+      if (Array.isArray(fd)) {
+        const mm = fd
+          .map((item) => ({
+            title: item.name || null,
+            infoHash: item.info_hash || item.infoHash || null,
+            seeders: toNumber(item.seeders),
+            leechers: toNumber(item.leechers),
+            size: toNumber(item.size),
+            quality: parseQualityFromTitle(item.name || '')
+          }))
+          .filter((r) => r.title && r.infoHash);
+        for (const r of mm) {
+          const ql = r.quality || 'unknown';
+          const prev = byQualityRaw.get(ql);
+          if (!prev || (r.seeders || 0) > (prev.seeders || 0)) byQualityRaw.set(ql, r);
+        }
+      }
+    } catch {}
+  }
+
+  const finalSelected = [];
+  for (const ql of qualitiesOrder) {
+    const item = byQualityRaw.get(ql);
+    if (item) finalSelected.push(item);
+  }
+  if (!finalSelected.length) {
+    finalSelected.push(...mapped.sort((a,b)=> (b.seeders||0)-(a.seeders||0)).slice(0,3));
+  }
+
+  const resolved = await runWithConcurrency(finalSelected, 4, async (r) => {
+    const torrentUrl = await resolveTorrentUrlFromHash(r.infoHash);
+    if (!torrentUrl) return null;
+    return {
+      id: r.infoHash,
+      title: r.title,
+      year: null,
+      quality: r.quality || parseQualityFromTitle(r.title),
+      size: r.size,
+      seeders: r.seeders || 0,
+      leechers: r.leechers || 0,
+      source: 'PirateBay',
+      magnet_link: null,
+      torrent_url: torrentUrl,
+      imdb_rating: null,
+      poster_url: null,
+    };
+  });
+
+  const valid = resolved.filter(Boolean);
+  console.log(`[PirateBay] Parsed results: ${valid.length}`);
+  return valid;
+}
+
 // Helper function to search a single page
 async function searchPirateBayPage(query, page = 0, options = {}) {
   const q = String(query || '').trim();
@@ -138,149 +252,36 @@ export async function searchPirateBay(query, options = {}) {
     const allowSeries = options.allowSeries || false;
     const multiPage = options.multiPage || false;
     
-    if (multiPage && allowSeries) {
-      // Multi-page search for series
-      console.log(`[PirateBay] Multi-page search for series: ${q}`);
-      const pagePromises = [0, 1, 2, 3, 4].map(page => 
-        searchPirateBayPage(q, page, { allowSeries: true })
-      );
-      
-      const allPageResults = await Promise.all(pagePromises);
-      const allResults = allPageResults.flat();
-      
-      console.log(`[PirateBay] Multi-page search completed: ${allResults.length} total results`);
-      
-      // Remove duplicates based on infoHash
-      const seen = new Set();
-      const uniqueResults = allResults.filter(r => {
-        if (seen.has(r.infoHash)) return false;
-        seen.add(r.infoHash);
-        return true;
-      });
-      
-      console.log(`[PirateBay] After deduplication: ${uniqueResults.length} unique results`);
-      return uniqueResults;
+    // Try alternative spellings for common misspellings
+    const alternativeQueries = [q];
+    
+    // Common spelling variations
+    if (q.includes('Kandanthe')) {
+      alternativeQueries.push(q.replace('Kandanthe', 'Kandante'));
     }
-
-    // Single page search (original behavior)
-    const { data } = await http.get('https://apibay.org/q.php', {
-      params: { q, cat: 0 },
-      timeout: 8000
-    });
-
-    if (!Array.isArray(data) || !data.length) {
-      console.log('[PirateBay] API returned no items');
-      return [];
+    if (q.includes('Kandante')) {
+      alternativeQueries.push(q.replace('Kandante', 'Kandanthe'));
     }
-
-    // Map raw items; then pick best-by-seeders per quality FIRST, resolve torrents only for those
-    const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9\s]/g,' ').replace(/\s+/g,' ').trim();
-    const qNorm = norm(q);
-    const rawWords = qNorm.split(' ').filter(Boolean);
-    // Build stable tokens: ignore 1-char junk; collapse sequences like "k g f" -> "kgf"
-    let tokens = rawWords.filter(w => w.length >= 2);
-    if (!tokens.length && rawWords.length >= 2 && rawWords.every(w => w.length === 1)) {
-      tokens = [rawWords.join('')];
-    }
-    // Always keep a numeric token like "1" if present
-    if (rawWords.some(w => /^(\d{1,4})$/.test(w))) {
-      const nums = rawWords.filter(w => /^(\d{1,4})$/.test(w));
-      nums.forEach(n => { if (!tokens.includes(n)) tokens.push(n); });
-    }
-    const isTvPattern = (t) => /\bS\d{1,2}E\d{1,2}\b/i.test(t);
-
-    const mapped = data
-      .map((item) => ({
-        title: item.name || null,
-        infoHash: item.info_hash || item.infoHash || null,
-        seeders: toNumber(item.seeders),
-        leechers: toNumber(item.leechers),
-        size: toNumber(item.size),
-        quality: parseQualityFromTitle(item.name || '')
-      }))
-      .filter((r) => r.title && r.infoHash)
-      // tighten: require all query words to appear in title, and conditionally drop TV episode patterns
-      .filter((r) => {
-        const t = norm(r.title);
-        // Only filter out TV patterns if allowSeries is false (movie search)
-        if (!allowSeries && isTvPattern(r.title)) return false;
-        // require all meaningful tokens to appear in title
-        return tokens.every(w => t.includes(w));
+    
+    // Try each alternative query
+    for (const altQuery of alternativeQueries) {
+      console.log(`[PirateBay] Trying query: "${altQuery}"`);
+      
+      const { data } = await http.get('https://apibay.org/q.php', {
+        params: { q: altQuery, cat: 0 },
+        timeout: 8000
       });
 
-    // Group by quality and pick the top-seeded within each quality; limit to desired qualities
-    const qualitiesOrder = ['2160p','1440p','1080p','720p','480p','360p'];
-    const byQualityRaw = new Map();
-    for (const r of mapped) {
-      const ql = r.quality || 'unknown';
-      const prev = byQualityRaw.get(ql);
-      if (!prev || (r.seeders || 0) > (prev.seeders || 0)) byQualityRaw.set(ql, r);
+      if (Array.isArray(data) && data.length > 0 && data[0].name !== 'No results returned') {
+        console.log(`[PirateBay] Found results with query: "${altQuery}"`);
+        // Use the successful query for processing
+        const successfulQuery = altQuery;
+        return await processPirateBayResults(data, successfulQuery, options);
+      }
     }
-    const selected = [];
-    for (const ql of qualitiesOrder) {
-      const item = byQualityRaw.get(ql);
-      if (item) selected.push(item);
-    }
-    // If we are missing common lower qualities, fetch fallback pages with explicit quality tokens
-    const need720 = !selected.some(r => (r.quality||'').includes('720'));
-    const need480 = !selected.some(r => (r.quality||'').includes('480'));
-    const fallbackQueries = [];
-    if (need720) fallbackQueries.push(`${q} 720p`);
-    if (need480) fallbackQueries.push(`${q} 480p`);
-    for (const fq of fallbackQueries) {
-      try {
-        const { data: fd } = await http.get('https://apibay.org/q.php', { params: { q: fq, cat: 0 }, timeout: 6000 });
-        if (Array.isArray(fd)) {
-          const mm = fd
-            .map((item) => ({
-              title: item.name || null,
-              infoHash: item.info_hash || item.infoHash || null,
-              seeders: toNumber(item.seeders),
-              leechers: toNumber(item.leechers),
-              size: toNumber(item.size),
-              quality: parseQualityFromTitle(item.name || '')
-            }))
-            .filter((r) => r.title && r.infoHash);
-          for (const r of mm) {
-            const ql = r.quality || 'unknown';
-            const prev = byQualityRaw.get(ql);
-            if (!prev || (r.seeders || 0) > (prev.seeders || 0)) byQualityRaw.set(ql, r);
-          }
-        }
-      } catch {}
-    }
-
-    const finalSelected = [];
-    for (const ql of qualitiesOrder) {
-      const item = byQualityRaw.get(ql);
-      if (item) finalSelected.push(item);
-    }
-    if (!finalSelected.length) {
-      finalSelected.push(...mapped.sort((a,b)=> (b.seeders||0)-(a.seeders||0)).slice(0,3));
-    }
-
-    const resolved = await runWithConcurrency(finalSelected, 4, async (r) => {
-      const torrentUrl = await resolveTorrentUrlFromHash(r.infoHash);
-      if (!torrentUrl) return null;
-      return {
-        id: r.infoHash,
-        title: r.title,
-        year: null,
-        quality: r.quality || parseQualityFromTitle(r.title),
-        size: r.size,
-        seeders: r.seeders || 0,
-        leechers: r.leechers || 0,
-        source: 'PirateBay',
-        magnet_link: null,
-        torrent_url: torrentUrl,
-        imdb_rating: null,
-        poster_url: null,
-      };
-    });
-
-    const valid = resolved.filter(Boolean);
-    console.log(`[PirateBay] Parsed results: ${valid.length}`);
-    return valid;
+    
+    console.log('[PirateBay] No results found with any query variation');
+    return [];
   } catch (e) {
     console.error('[PirateBay] Error:', e?.message || e);
     return [];

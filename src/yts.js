@@ -1,5 +1,5 @@
-import { http } from './http.js';
-import { randomDelay } from './delay.js';
+import { http } from './utils/http.js';
+import { randomDelay } from './utils/delay.js';
 
 // YTS API endpoint - official domain (use VPN at network level if required)
 const YTS_API = 'https://yts.mx/api/v2/list_movies.json';

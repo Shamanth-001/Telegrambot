@@ -1,4 +1,4 @@
-import { http } from './http.js';
+import { http } from './utils/http.js';
 import { load as loadHTML } from 'cheerio';
 
 // Infer quality and size from a URL/filename and nearby text
@@ -108,17 +108,51 @@ function computeMatchScore(query, title) {
   const t = (title || '').toLowerCase();
   if (!q || !t) return 10;
   if (t === q) return 0; // exact full string
+  
+  // Remove common words for better matching
+  const removeCommonWords = (text) => {
+    return text.replace(/\b(the|a|an|and|or|but|in|on|at|to|for|of|with|by)\b/g, '').trim();
+  };
+  
+  const qClean = removeCommonWords(q);
+  const tClean = removeCommonWords(t);
+  
   // For very short queries (<=3), require whole-word match to avoid false positives (e.g., RRR vs Grrr)
-  if (q.length <= 3) {
-    const wordRe = new RegExp(`(^|[^a-z0-9])${q}([^a-z0-9]|$)`);
-    if (wordRe.test(t)) return 1;
-  } else if (t.includes(q)) {
+  if (qClean.length <= 3) {
+    const wordRe = new RegExp(`(^|[^a-z0-9])${qClean}([^a-z0-9]|$)`);
+    if (wordRe.test(tClean)) return 1;
+  } else if (tClean.includes(qClean)) {
     return 1; // generic substring for longer queries
   }
-  const qWords = q.split(/\s+/).filter(Boolean);
-  const tWords = new Set(t.split(/[^a-z0-9]+/).filter(Boolean));
+  
+  // Extract core words (remove years, quality indicators, etc.)
+  const extractCoreWords = (text) => {
+    return text.replace(/\([^)]*\)/g, '') // Remove parentheses content
+               .replace(/\b(19|20)\d{2}\b/g, '') // Remove years
+               .replace(/\b(1080p|720p|480p|hd|sd|brrip|webrip|hdrip|bluray|dvdrip|dvdscr|cam|ts|tc)\b/g, '') // Remove quality
+               .replace(/\b(hindi|english|telugu|tamil|malayalam|kannada|bengali|gujarati|marathi|punjabi|dubbed|subbed)\b/g, '') // Remove language
+               .replace(/\b(movie|film|watch|online|free|download|stream)\b/g, '') // Remove common words
+               .replace(/\s+/g, ' ')
+               .trim();
+  };
+  
+  const qCore = extractCoreWords(qClean);
+  const tCore = extractCoreWords(tClean);
+  
+  // Check if core words match (allow collections/quadrilogy)
+  if (tCore.includes(qCore) || qCore.includes(tCore)) return 1;
+  const mainWord = qCore.split(/\s+/).find(Boolean);
+  if (mainWord && tCore.includes(mainWord)) return 1;
+  // Looser fuzzy: at least two overlapping words
+  const qWords = qCore.split(/\s+/).filter(Boolean);
+  const tWords = new Set(tCore.split(/\s+/).filter(Boolean));
+  const overlap = qWords.filter(w => tWords.has(w)).length;
+  if (overlap >= Math.min(2, qWords.length)) return 2;
+  
+  // Word-level matching with core words
   const wordHit = qWords.some(w => tWords.has(w));
   if (wordHit) return 2; // word-level match
+  
   return 5; // weak match
 }
 
@@ -126,10 +160,9 @@ export async function searchMovierulz(query, options = {}) {
   console.log(`[Movierulz] Searching for: ${query}`);
   
   try {
-    // Working Movierulz domains
+    // Working Movierulz domain (single domain as requested)
     const domains = [
-      'https://www.5movierulz.guide',
-      'https://www.5movierulz.lease'
+      'https://www.5movierulz.gripe'
     ];
 
     // Use only the best query to reduce processing time

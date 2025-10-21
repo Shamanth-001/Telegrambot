@@ -1,0 +1,35 @@
+{
+  "proxies": [
+    {
+      "name": "Local HTTP Proxy",
+      "host": "127.0.0.1",
+      "port": 8080,
+      "type": "http",
+      "username": "",
+      "password": "",
+      "country": "Local",
+      "speed": "fast"
+    },
+    {
+      "name": "Local SOCKS5 Proxy",
+      "host": "127.0.0.1",
+      "port": 1080,
+      "type": "socks5",
+      "username": "",
+      "password": "",
+      "country": "Local",
+      "speed": "fast"
+    },
+    {
+      "name": "Free HTTP Proxy 1",
+      "host": "8.8.8.8",
+      "port": 8080,
+      "type": "http",
+      "username": "",
+      "password": "",
+      "country": "US",
+      "speed": "medium"
+    }
+  ],
+  "lastUpdated": "2025-10-19T05:18:57.578Z"
+}

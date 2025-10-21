@@ -1,9 +1,9 @@
 import express from 'express';
 import helmet from 'helmet';
 import client from 'prom-client';
-import { logger } from './logger.js';
-import { checkSourceAvailability } from './status.js';
-import { http } from './http.js';
+import { logger } from './utils/logger.js';
+import { checkSourceAvailability } from './utils/status.js';
+import { http } from './utils/http.js';
 // Removed unused imports for Einthusan functionality
 
 const collectDefaultMetrics = client.collectDefaultMetrics;
