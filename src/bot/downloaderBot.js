@@ -3,17 +3,11 @@ import TelegramBot from 'node-telegram-bot-api';
 import { movieCache } from '../movieCache.js';
 import { searchTorrents } from '../services/searchService.js';
 import { searchEinthusan } from '../einthusan.js';
-import { downloadFmoviesMovie } from '../fmovies-downloader.js';
-import { downloadFmoviesAdvanced } from '../advanced-fmovies-downloader.js';
-import { downloadFmoviesPrecise } from '../precise-fmovies-downloader.js';
-import { searchYTS } from '../yts.js';
-import { searchYTS as searchYTS_TV } from '../ytstv.js';
+// Removed fmovies imports - not needed for torrent-first approach
+// Removed YTS imports - not needed for torrent-first approach
 
 // Imports for direct download solutions
-import { downloadCatazInSession } from '../cataz-session-downloader.js';
-import { decryptFmoviesBlob } from '../fmovies-blob-decryptor.js';
-import { downloadCatazEnhanced } from '../enhanced-cataz-downloader.js';
-import { downloadFmoviesEnhanced } from '../enhanced-fmovies-downloader.js';
+// Removed cataz/fmovies imports - not needed for torrent-first approach
 
 // Imports for DRM bypass tools
 import { 
@@ -170,7 +164,6 @@ export class DownloaderBot {
     
     try {
       // Send status update
-      // Try sending IMDb poster; fall back to text-only if not available
       const posterUrl = await getImdbPoster(title);
       if (posterUrl) {
         try {
@@ -194,76 +187,123 @@ export class DownloaderBot {
         );
       }
 
-      // Try different sources
-      let downloadResult = null;
-      let sourceIndicator = '';
-
-      // 1. Try streaming sources first (limited options available)
-      logger.info(`[DownloaderBot] Trying streaming sources for "${title}"`);
+      // 1. Try torrent first
+      logger.info(`[DownloaderBot] Trying torrent for: ${title}`);
+      const torrentResult = await this.downloadFromTorrent(title);
       
-      // 2. Try streaming sources directly
-        try {
-          logger.info(`[DownloaderBot] Searching streaming sources for "${title}"`);
-          downloadResult = await this.downloadFromStreaming(title);
-          if (downloadResult) {
-            downloadResult.source_type = 'streaming';
-            sourceIndicator = '🌐 Streaming fallback';
-            await this.bot.sendMessage(
+      if (torrentResult) {
+        if (torrentResult.isTorrentFile) {
+          // High seeders: Upload .torrent file to channel
+          logger.info(`[DownloaderBot] High seeders (${torrentResult.seeders}) - uploading torrent file`);
+          
+          const uploadResult = await this.uploadTorrentToChannel(
+            torrentResult.filePath, 
+            title, 
+            torrentResult.seeders
+          );
+          
+          if (uploadResult.success) {
+            // Send torrent file to user
+            await this.bot.sendDocument(
               requesterChatId,
-              `${sourceIndicator}\n⏳ Downloading "${title}" from ${downloadResult.sourceName}...`,
-              { parse_mode: 'Markdown' }
+              torrentResult.filePath,
+              {
+                caption: `🌱 **${title} - Torrent File**\n📊 **${torrentResult.seeders} seeders**\n\n💡 Use uTorrent or qBittorrent to download\n📁 File ID: \`${uploadResult.file_id}\``,
+                parse_mode: 'Markdown'
+              }
             );
-            logger.info(`[DownloaderBot] Streaming source selected: ${downloadResult.sourceName} (${downloadResult.sourceUrl})`);
+            
+            // Clean up local torrent file
+            if (fs.existsSync(torrentResult.filePath)) {
+              fs.unlinkSync(torrentResult.filePath);
+            }
+            
+            logger.info(`Successfully uploaded torrent file for: ${title}`);
+            return;
           }
-        } catch (error) {
-          logger.error(`Streaming download failed for ${title}:`, error);
+        } else {
+          // This shouldn't happen with new logic, but handle just in case
+          logger.warn(`[DownloaderBot] Unexpected torrent result without isTorrentFile flag`);
+        }
+      }
+
+      // 2. Low seeders or no torrent: Try streaming, fallback to torrent file
+      logger.info(`[DownloaderBot] Trying streaming sources for: ${title}`);
+      const streamingResult = await this.downloadFromStreaming(title);
+      
+      if (streamingResult) {
+        logger.info(`[DownloaderBot] Streaming download successful: ${streamingResult.filePath}`);
+        
+        // Upload full movie to channel
+        const uploadResult = await this.uploadToCacheChannel(streamingResult.filePath, title);
+        
+        if (!uploadResult.success) {
+          throw new Error('Failed to upload to cache channel');
         }
 
-      // If no streaming sources found, provide helpful message
-      if (!downloadResult) {
-        logger.info(`[DownloaderBot] No streaming sources found for "${title}"`);
-        logger.info(`[DownloaderBot] NOTE: Cataz only has trailers (17MB), not full movies`);
-        logger.info(`[DownloaderBot] For full movies, consider using torrent sources when seeders < 15`);
+        // Add to cache database
+        const cacheData = {
+          title,
+          file_id: uploadResult.file_id,
+          message_id: uploadResult.message_id,
+          channel_id: this.cacheChannelId,
+          file_size: streamingResult.fileSize,
+          source_type: 'streaming',
+          source_url: streamingResult.sourceUrl,
+          ttl_hours: 24 // 24 hours TTL
+        };
+
+        movieCache.addMovie(cacheData);
+
+        // Clean up local file
+        if (fs.existsSync(streamingResult.filePath)) {
+          fs.unlinkSync(streamingResult.filePath);
+        }
+
+        // Notify requester
+        await this.bot.sendMessage(
+          requesterChatId,
+          `✅ **${title}** downloaded and cached!\n\n📁 File ID: \`${uploadResult.file_id}\`\n💾 Cached for 24 hours\n🎬 Ready for instant delivery!`,
+          { parse_mode: 'Markdown' }
+        );
+
+        logger.info(`Successfully downloaded and cached: ${title}`);
+        return;
+      } else {
+        // Streaming failed - provide torrent file as fallback even with low seeders
+        logger.warn(`[DownloaderBot] Streaming failed, providing torrent file as fallback`);
+        
+        if (torrentResult && torrentResult.filePath) {
+          const uploadResult = await this.uploadTorrentToChannel(
+            torrentResult.filePath, 
+            title, 
+            torrentResult.seeders || 0
+          );
+          
+          if (uploadResult.success) {
+            // Send torrent file to user with warning about low seeders
+            await this.bot.sendDocument(
+              requesterChatId,
+              torrentResult.filePath,
+              {
+                caption: `🌱 **${title} - Torrent File**\n📊 **${torrentResult.seeders || 0} seeders** (Low)\n\n⚠️ **Low seeders - download may be slow**\n💡 Use uTorrent or qBittorrent to download\n📁 File ID: \`${uploadResult.file_id}\``,
+                parse_mode: 'Markdown'
+              }
+            );
+            
+            // Clean up local torrent file
+            if (fs.existsSync(torrentResult.filePath)) {
+              fs.unlinkSync(torrentResult.filePath);
+            }
+            
+            logger.info(`Successfully uploaded torrent file as fallback for: ${title}`);
+            return;
+          }
+        }
       }
 
-      if (!downloadResult) {
-        throw new Error('No sources found for this movie');
-      }
-
-      // Upload to cache channel
-      const uploadResult = await this.uploadToCacheChannel(downloadResult.filePath, title);
-      
-      if (!uploadResult.success) {
-        throw new Error('Failed to upload to cache channel');
-      }
-
-      // Add to cache database
-      const cacheData = {
-        title,
-        file_id: uploadResult.file_id,
-        message_id: uploadResult.message_id,
-        channel_id: this.cacheChannelId,
-        file_size: downloadResult.fileSize,
-        source_type: downloadResult.source_type,
-        source_url: downloadResult.sourceUrl,
-        ttl_hours: 24 // 24 hours TTL
-      };
-
-      movieCache.addMovie(cacheData);
-
-      // Clean up local file
-      if (fs.existsSync(downloadResult.filePath)) {
-        fs.unlinkSync(downloadResult.filePath);
-      }
-
-      // Notify requester
-      await this.bot.sendMessage(
-        requesterChatId,
-        `✅ **${title}** downloaded and cached!\n\n📁 File ID: \`${uploadResult.file_id}\`\n💾 Cached for 24 hours\n🎬 Ready for instant delivery!`,
-        { parse_mode: 'Markdown' }
-      );
-
-      logger.info(`Successfully downloaded and cached: ${title}`);
+      // 3. No sources found
+      throw new Error('No sources found for this movie');
 
     } catch (error) {
       logger.error(`Download failed for ${title}:`, error);
@@ -311,26 +351,58 @@ export class DownloaderBot {
         try { await this.bot.sendMessage(requesterChatId, seederMsg, { parse_mode: 'Markdown' }); } catch {}
       }
 
-      if ((torrent.seeders ?? 0) < minSeeders) {
-        // below threshold → force streaming fallback
+      if ((torrent.seeders ?? 0) >= minSeeders) {
+        // High seeders: Download .torrent file only
+        logger.info(`[Downloader] High seeders (${torrent.seeders}) - downloading .torrent file`);
+        return await this.downloadTorrentFile(torrent);
+      } else {
+        // Low seeders: Return null to trigger streaming download
+        logger.info(`[Downloader] Low seeders (${torrent.seeders}) - falling back to streaming`);
         return null;
       }
-      
-      // For now, return a mock result - you'll need to implement actual torrent downloading
-      // This would use WebTorrent or similar library
-      const outputPath = `downloads/${title.replace(/[^a-zA-Z0-9]/g, '_')}.mkv`;
-      
-      // Mock implementation - replace with actual torrent download
-      logger.info(`Would download torrent: ${torrent.title} -> ${outputPath}`);
-      
-      return {
-        filePath: outputPath,
-        fileSize: 0, // Would be actual file size
-        sourceUrl: torrent.magnet_link || torrent.magnet || torrent.torrent_url || torrent.url
-      };
 
     } catch (error) {
       logger.error('Torrent download error:', error);
+      return null;
+    }
+  }
+
+  /**
+   * Download torrent file (not the movie itself)
+   * @param {Object} torrent - Torrent object with URL and metadata
+   * @returns {Object|null} Download result
+   */
+  async downloadTorrentFile(torrent) {
+    try {
+      const axios = require('axios');
+      const fs = require('fs');
+      
+      const torrentUrl = torrent.torrent_url || `https://itorrents.org/torrent/${torrent.infoHash}.torrent`;
+      logger.info(`[Downloader] Downloading torrent file from: ${torrentUrl}`);
+      
+      const response = await axios.get(torrentUrl, { 
+        responseType: 'arraybuffer',
+        timeout: 30000 
+      });
+      
+      const buffer = Buffer.from(response.data);
+      const filename = `${torrent.title.replace(/[^a-zA-Z0-9]/g, '_')}.torrent`;
+      const filePath = `downloads/${filename}`;
+      
+      fs.writeFileSync(filePath, buffer);
+      
+      logger.info(`[Downloader] Torrent file saved: ${filePath} (${buffer.length} bytes)`);
+      
+      return {
+        filePath,
+        fileSize: buffer.length,
+        sourceUrl: torrentUrl,
+        sourceName: 'Torrent',
+        isTorrentFile: true,
+        seeders: torrent.seeders
+      };
+    } catch (error) {
+      logger.error('Failed to download torrent file:', error);
       return null;
     }
   }
@@ -342,84 +414,23 @@ export class DownloaderBot {
    */
   async downloadFromStreaming(title) {
     try {
-      // Try multiple streaming sources in priority order (working sources first)
-      // NOTE: Cataz only has trailers (17MB), not full movies
-      const streamingSources = [
-        { name: 'Einthusan', searchFn: searchEinthusan, hasAudio: true, directDownload: false },
-        { name: 'Enhanced Cataz', searchFn: null, hasAudio: true, directDownload: true, downloadFn: downloadCatazEnhanced, priority: 1 },
-        { name: 'Enhanced Fmovies', searchFn: null, hasAudio: true, directDownload: true, downloadFn: downloadFmoviesEnhanced, priority: 2 },
-        { name: 'Cataz Session', searchFn: null, hasAudio: true, directDownload: true, downloadFn: downloadCatazInSession, priority: 3 },
-        { name: 'Fmovies Blob', searchFn: null, hasAudio: true, directDownload: true, downloadFn: decryptFmoviesBlob, priority: 4 },
-        { name: 'StreamFab DRM', searchFn: null, hasAudio: true, directDownload: true, downloadFn: downloadWithStreamFab, priority: 5 },
-        { name: 'Universal DRM', searchFn: null, hasAudio: true, directDownload: true, downloadFn: downloadWithUniversalDRMBypass, priority: 6 }
-      ];
-
-      for (const source of streamingSources) {
-        try {
-          logger.info(`Searching ${source.name} for: ${title} (Audio: ${source.hasAudio ? 'YES' : 'NO'})`);
-          
-          // Handle direct download sources (no search needed)
-          if (source.directDownload && source.downloadFn) {
-            logger.info(`[DownloaderBot] Using direct download for ${source.name}`);
-            const outputPath = `downloads/${title.replace(/[^a-zA-Z0-9]/g, '_')}_${source.name.replace(/\s+/g, '_')}.mp4`;
-            
-            // Use the specific download function for this source
-            const downloadResult = await source.downloadFn(
-              `https://cataz.to/movie/watch-${title.toLowerCase().replace(/\s+/g, '-')}-19690`, // Cataz URL format
-              outputPath
-            );
-            
-            if (downloadResult.success) {
-              return {
-                filePath: downloadResult.filePath,
-                fileSize: downloadResult.fileSize || 0,
-                sourceUrl: downloadResult.streamUrl || 'Direct download',
-                sourceName: source.name
-              };
-            }
-          } else if (source.searchFn) {
-            // Handle search-based sources
-            const results = await source.searchFn(title);
-            
-            if (results && results.length > 0) {
-              const movie = results[0];
-              const outputPath = `downloads/${title.replace(/[^a-zA-Z0-9]/g, '_')}.mp4`;
-              
-              logger.info(`Found on ${source.name}: ${movie.title} -> ${outputPath}`);
-              
-              // Use direct download for sources that support it
-              if (source.directDownload) {
-                logger.info(`[DownloaderBot] Using direct download for ${source.name}`);
-                // For direct download sources, we can use yt-dlp or similar
-                const downloadResult = await this.downloadDirectStream(movie.url, outputPath);
-                if (downloadResult.success) {
-                  return {
-                    filePath: downloadResult.filePath,
-                    fileSize: downloadResult.fileSize || 0,
-                    sourceUrl: movie.url,
-                    sourceName: source.name
-                  };
-                }
-              } else {
-                // Use your existing conversion pipeline for other sources
-                const conversionResult = await this.convertStreamingContent(movie.url, outputPath);
-                
-                if (conversionResult.success) {
-                  return {
-                    filePath: outputPath,
-                    fileSize: conversionResult.fileSize || 0,
-                    sourceUrl: movie.url,
-                    sourceName: source.name
-                  };
-                }
-              }
-            }
-          }
-        } catch (error) {
-          logger.error(`${source.name} search failed for ${title}:`, error);
-        }
+      logger.info(`[DownloaderBot] Using automated streaming downloader for: ${title}`);
+      
+      // Use the new automated streaming downloader
+      const { downloadMovieFromStreaming } = await import('../services/automatedStreamDownloader.js');
+      const result = await downloadMovieFromStreaming(title);
+      
+      if (result) {
+        logger.info(`[DownloaderBot] Automated download successful: ${result.filePath} (${(result.fileSize / 1024 / 1024).toFixed(2)} MB)`);
+        return {
+          filePath: result.filePath,
+          fileSize: result.fileSize,
+          sourceUrl: result.sourceUrl,
+          sourceName: result.sourceName
+        };
       }
-
+      
+      logger.warn(`[DownloaderBot] Automated streaming download failed for: ${title}`);
       return null;
 
     } catch (error) {
@@ -708,6 +719,46 @@ export class DownloaderBot {
 
     } catch (error) {
       logger.error('Upload to cache channel failed:', error);
+      return {
+        success: false,
+        error: error.message
+      };
+    }
+  }
+
+  /**
+   * Upload torrent file to cache channel
+   * @param {string} filePath - Local torrent file path
+   * @param {string} title - Movie title
+   * @param {number} seeders - Number of seeders
+   * @returns {Object} Upload result
+   */
+  async uploadTorrentToChannel(filePath, title, seeders) {
+    try {
+      if (!fs.existsSync(filePath)) {
+        throw new Error('Torrent file does not exist');
+      }
+
+      const fileStats = fs.statSync(filePath);
+      
+      // Upload torrent file to cache channel
+      const result = await this.bot.sendDocument(
+        this.cacheChannelId,
+        filePath,
+        {
+          caption: `🌱 ${title} - Torrent File\n📊 Seeders: ${seeders}\n📁 Size: ${(fileStats.size / 1024).toFixed(2)} KB\n⏰ Cached: ${new Date().toLocaleString()}\n\n💡 Use uTorrent or qBittorrent to download`,
+          parse_mode: 'Markdown'
+        }
+      );
+
+      return {
+        success: true,
+        file_id: result.document.file_id,
+        message_id: result.message_id
+      };
+
+    } catch (error) {
+      logger.error('Upload torrent to cache channel failed:', error);
       return {
         success: false,
         error: error.message

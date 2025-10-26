@@ -98,7 +98,7 @@ export const SOURCE_CONFIG = {
 };
 
 // Current mode - Change this to switch between modes
-export const CURRENT_MODE = 'TESTING_MODE'; // Options: EINTHUSAN_ONLY, ALL_SOURCES, WORKING_SOURCES, YTS_ONLY, NEW_SOURCES_ONLY, TESTING_MODE
+export const CURRENT_MODE = 'WORKING_SOURCES'; // Options: EINTHUSAN_ONLY, ALL_SOURCES, WORKING_SOURCES, YTS_ONLY, NEW_SOURCES_ONLY, TESTING_MODE
 
 // Get current source configuration
 export function getCurrentSourceConfig() {

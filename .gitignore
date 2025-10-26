@@ -84,6 +84,13 @@ public
 tmp/
 temp/
 
+# Editor directories and files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
 # OS generated files
 .DS_Store
 .DS_Store?
@@ -93,42 +100,8 @@ temp/
 ehthumbs.db
 Thumbs.db
 
-# IDE files
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# Project specific
+# Downloaded files and cache
 downloads/
-cache/
-sessions/
-*.db
-*.sqlite
-*.sqlite3
-movie_cache.db
-comprehensive-requests.json
-network-requests-debug.json
-jobs.json
-performance-stats.json
-
-# Test files
-test-*.js
-test*.js
-*test*.js
-
-# Build outputs
-build/
-dist/
-out/
-
-# FFmpeg binaries (if included)
-ffmpeg-*/
-ffmpeg.exe
-ffprobe.exe
-
-# Video files
 *.mp4
 *.mkv
 *.avi
@@ -136,25 +109,39 @@ ffprobe.exe
 *.wmv
 *.flv
 *.webm
-*.m4v
-*.3gp
-*.ogv
-
-# Audio files
-*.mp3
-*.wav
-*.flac
-*.aac
-*.ogg
-*.wma
-
-# Archive files
-*.zip
-*.rar
-*.7z
-*.tar
-*.gz
-
-# Large files that shouldn't be in git
 *.part
+*.ytdl
+*.torrent
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+movie_cache.db
+
+# Session and cookies
+cookies.json
+session=valid
+session.json
+
+# Log files
+*.log
+debug.log
+cataz-fixed.log
+cataz-ultimate.log
+myeasylog.log
+
+# Test files
+test-*.js
+debug-*.js
+
+# Browser data
+browser-data/
+user-data/
+
+# Proxy config
+proxy-config.json
+
+# Temporary files
 *.tmp
+*.temp

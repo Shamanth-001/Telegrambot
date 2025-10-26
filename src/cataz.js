@@ -32,10 +32,46 @@ export async function searchCataz(query, options = {}) {
     
     const page = await browser.newPage();
     
-    // Set realistic browser settings + stealth headers
-    await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9', 'Referer': 'https://cataz.to/' });
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.7204.243 Safari/537.36');
-    await page.setViewport({ width: 1366, height: 768 });
+    // Set realistic browser settings with enhanced stealth headers
+    await page.setExtraHTTPHeaders({ 
+      'Accept-Language': 'en-US,en;q=0.9,es;q=0.8', 
+      'Referer': 'https://cataz.to/',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+      'Accept-Encoding': 'gzip, deflate, br',
+      'Cache-Control': 'no-cache',
+      'Pragma': 'no-cache',
+      'Sec-Fetch-Dest': 'document',
+      'Sec-Fetch-Mode': 'navigate',
+      'Sec-Fetch-Site': 'none',
+      'Sec-Fetch-User': '?1',
+      'Upgrade-Insecure-Requests': '1'
+    });
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36');
+    await page.setViewport({ width: 1920, height: 1080, deviceScaleFactor: 1 });
+    
+    // Override webdriver detection
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, 'webdriver', {
+        get: () => undefined,
+      });
+      
+      // Override the plugins property to use a custom getter
+      Object.defineProperty(navigator, 'plugins', {
+        get: () => [1, 2, 3, 4, 5],
+      });
+      
+      // Override the languages property to use a custom getter
+      Object.defineProperty(navigator, 'languages', {
+        get: () => ['en-US', 'en'],
+      });
+      
+      // Override the permissions property to use a custom getter
+      Object.defineProperty(navigator, 'permissions', {
+        get: () => ({
+          query: () => Promise.resolve({ state: 'granted' }),
+        }),
+      });
+    });
     
     // Navigate to search page
     const searchUrl = `https://cataz.to/search/${encodeURIComponent(query)}`;

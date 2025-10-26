@@ -1,194 +1,108 @@
-# 🎬 Two-Bot Movie Cache System - Implementation Summary
+# Automated Movie Download System - Implementation Summary
 
-## ✅ **Completed Implementation**
+## ✅ Completed Implementation
 
-### **1. Removed Fast Streamer System**
-- ❌ Deleted `src/fast-streamer.js`
-- ❌ Deleted `src/fast-stream-command.js` 
-- ❌ Deleted `FAST_STREAMING_SOLUTION.md`
-- ✅ Removed fast streaming imports from `src/bot/index.js`
-- ✅ Removed fast streaming commands from bot
+### 1. Created Automated Streaming Downloader
+**File: `src/services/automatedStreamDownloader.js`**
+- Uses Puppeteer with stealth plugin for anti-detection
+- Tries multiple streaming sites: FlixHQ, SolarMovie, ZoeChip
+- Captures HLS/m3u8 streams via request interception
+- Downloads with ffmpeg for proper full-length movies
+- Validates file size > 500MB for real movies
+- Returns full movie path and metadata
 
-### **2. Created Movie Cache Database**
-- ✅ `src/movieCache.js` - SQLite database for movie index
-- ✅ Features: Add, get, search, cleanup expired movies
-- ✅ TTL support (24-hour default)
-- ✅ Statistics and monitoring
+### 2. Updated DownloaderBot Logic
+**File: `src/bot/downloaderBot.js`**
 
-### **3. Created Downloader Bot (Bot A)**
-- ✅ `src/downloaderBot.js` - Background worker
-- ✅ Download queue management
-- ✅ Torrent and streaming source integration
-- ✅ Upload to private cache channel
-- ✅ Database updates
-- ✅ Automatic cleanup scheduler
+#### Added Methods:
+- `downloadTorrentFile()` - Downloads .torrent files (not movies)
+- `uploadTorrentToChannel()` - Uploads torrent files to channel
 
-### **4. Created API Bot (Bot B)**
-- ✅ `src/apiBot.js` - User interface
-- ✅ Instant cache delivery
-- ✅ Download request forwarding
-- ✅ User feedback and status updates
-- ✅ Search and help commands
+#### Updated Methods:
+- `downloadFromTorrent()` - Now returns torrent files when seeders >= 15
+- `downloadFromStreaming()` - Now uses automated streaming downloader
+- `downloadMovie()` - Completely rewritten with new flow
 
-### **5. Created System Orchestrator**
-- ✅ `src/movieCacheSystem.js` - System management
-- ✅ Bot coordination
-- ✅ Health monitoring
-- ✅ Graceful shutdown
-- ✅ System statistics
+### 3. New Download Flow
 
-### **6. Created Configuration System**
-- ✅ `src/botConfig.js` - Configuration management
-- ✅ Environment variable validation
-- ✅ Default settings
-- ✅ Configuration display
+#### For Movies with High Seeders (>= 15):
+1. Search torrents → Find results with 150+ seeders
+2. Download .torrent file only (NOT the movie)
+3. Upload .torrent to private channel
+4. Send .torrent file to user with message: "150 seeders - use uTorrent"
 
-### **7. Created Main Entry Point**
-- ✅ `src/startMovieCacheSystem.js` - System startup
-- ✅ Error handling
-- ✅ Graceful shutdown
-- ✅ Startup validation
+#### For Movies with Low Seeders (< 15):
+1. Search torrents → Find results with 8 seeders
+2. Fall back to streaming sites
+3. Use automated Puppeteer + stream capture
+4. Download full movie (1-4GB) from FlixHQ/SolarMovie/ZoeChip
+5. Upload full movie to private channel
+6. Send movie to user
 
-### **8. Created Setup System**
-- ✅ `setup-two-bot-system.js` - Automated setup
-- ✅ Dependency checking
-- ✅ Configuration validation
-- ✅ Database testing
-- ✅ Setup instructions
+## 🎯 Expected Behavior
 
-### **9. Updated Package Configuration**
-- ✅ Added `better-sqlite3` dependency
-- ✅ Added new npm scripts:
-  - `npm run start-cache` - Start two-bot system
-  - `npm run setup-cache` - Run setup script
+### User searches "The Prestige 2006":
+1. Bot checks channel cache → not found
+2. Bot searches torrents → finds results with 8 seeders
+3. Seeders < 15 → Bot downloads full movie from FlixHQ (1.2GB)
+4. Bot uploads movie to private channel
+5. Bot sends movie to user
 
-### **10. Created Documentation**
-- ✅ `TWO_BOT_ARCHITECTURE.md` - Complete architecture guide
-- ✅ `IMPLEMENTATION_SUMMARY.md` - This summary
-- ✅ Setup instructions and examples
+### User searches "Interstellar 2014":
+1. Bot checks channel cache → not found
+2. Bot searches torrents → finds results with 150 seeders  
+3. Seeders >= 15 → Bot downloads .torrent file only
+4. Bot uploads .torrent to channel
+5. Bot sends .torrent file to user with message "150 seeders - use uTorrent"
 
-## 🎯 **System Architecture**
+## 🔧 Key Features
 
-```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   API Bot (B)   │    │ Downloader Bot  │    │ Private Channel │
-│                 │    │      (A)        │    │                 │
-│ • User Interface│◄──►│ • Background    │◄──►│ • File Storage  │
-│ • Instant Cache │    │   Worker        │    │ • 24h TTL       │
-│ • Download Req  │    │ • Download Queue│    │ • Auto Cleanup  │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
-         │                       │                       │
-         └───────────────────────┼───────────────────────┘
-                                 │
-                    ┌─────────────────┐
-                    │   SQLite DB     │
-                    │                 │
-                    │ • Movie Index   │
-                    │ • File IDs      │
-                    │ • TTL Tracking  │
-                    └─────────────────┘
-```
+### Automated Streaming Download:
+- ✅ Puppeteer with stealth plugin
+- ✅ Multiple streaming sites (FlixHQ, SolarMovie, ZoeChip)
+- ✅ Request interception for HLS/m3u8 streams
+- ✅ ffmpeg download for full movies
+- ✅ File size validation (> 500MB)
+- ✅ No manual intervention required
 
-## 🚀 **User Experience**
+### Torrent File Handling:
+- ✅ Downloads .torrent files when seeders >= 15
+- ✅ Uploads torrent files to channel
+- ✅ Sends torrent files to users
+- ✅ Includes seeder count in messages
 
-### **Cache Hit (Instant Delivery)**
-```
-User: /search KGF 2
-Bot: ✅ Found in cache: KGF 2
-     ⚡ Delivering instantly...
-[<1 second delivery]
-Bot: 🎉 Movie delivered instantly!
-```
+### Error Handling:
+- ✅ Graceful fallback from torrent to streaming
+- ✅ File size validation to reject trailers
+- ✅ Proper error messages to users
+- ✅ Cleanup of local files
 
-### **Cache Miss (Download Request)**
-```
-User: /search New Movie
-Bot: ❌ Not in cache: New Movie
-     📥 Requesting download...
-Bot: 📥 Download requested: New Movie
-     ⏳ ETA: 10-30 minutes
-     ⚡ Next time will be instant!
-```
+## 🧪 Testing
 
-## 📊 **Key Features**
+**Test Script: `test-automated-download.js`**
+- Tests automated streaming downloader
+- Validates file sizes
+- Tests multiple movies
+- Provides detailed logging
 
-### **Instant Delivery**
-- ⚡ Cached movies delivered in <1 second
-- 🎯 No waiting time for popular movies
-- 🔄 Seamless user experience
+## 📁 Files Modified/Created
 
-### **Automatic Download**
-- 📥 New movies automatically downloaded
-- 🔄 Queue management for multiple requests
-- ⚙️ Background processing
+### New Files:
+- `src/services/automatedStreamDownloader.js` - Automated streaming downloader
+- `test-automated-download.js` - Test script
+- `IMPLEMENTATION_SUMMARY.md` - This summary
 
-### **Smart Caching**
-- ⏰ 24-hour TTL for optimal storage
-- 🧹 Automatic cleanup prevents bloat
-- 📈 Popular movies stay cached longer
+### Modified Files:
+- `src/bot/downloaderBot.js` - Main bot logic updated
 
-### **High Availability**
-- 🏗️ Telegram's infrastructure for hosting
-- 💾 No server storage requirements
-- 📈 Scalable to thousands of movies
+## 🚀 Ready for Production
 
-## 🛠️ **Setup Process**
+The system is now ready to:
+1. ✅ Check channel cache first
+2. ✅ Search torrents with seeder threshold
+3. ✅ Download torrent files for high seeders
+4. ✅ Download full movies from streaming for low seeders
+5. ✅ Upload to Telegram private channel
+6. ✅ Send appropriate files to users
 
-### **1. Quick Setup**
-```bash
-# Install dependencies
-npm install
-
-# Run setup script
-npm run setup-cache
-
-# Start system
-npm run start-cache
-```
-
-### **2. Manual Setup**
-```bash
-# 1. Create two bots via @BotFather
-# 2. Create private channel
-# 3. Add bots to channel as admins
-# 4. Get channel ID
-# 5. Update .env file
-# 6. Start system
-```
-
-## 🎬 **Integration with Existing Code**
-
-The system seamlessly integrates with your existing modules:
-- ✅ `searchTorrents()` - Torrent searching
-- ✅ `searchEinthusan()` - Streaming sources  
-- ✅ `fetchPosterForTitle()` - Movie posters
-- ✅ Existing conversion logic - HLS/streaming conversion
-- ✅ All existing bot functionality preserved
-
-## 📈 **Performance Benefits**
-
-| Metric | Before | After |
-|--------|--------|-------|
-| Popular Movie Delivery | 1-2 hours | <1 second |
-| New Movie Download | 1-2 hours | 10-30 minutes |
-| User Experience | Wait & Download | Instant + Background |
-| Storage Usage | Server files | Telegram hosting |
-| Scalability | Limited | Unlimited |
-
-## 🎯 **Perfect For**
-
-- **Movie Groups**: Instant sharing of popular movies
-- **Personal Use**: Quick access to favorite movies  
-- **Content Creators**: Reliable movie delivery system
-- **Communities**: Shared movie library with instant access
-
-## 🚀 **Next Steps**
-
-1. **Setup**: Run `npm run setup-cache` to configure
-2. **Test**: Start system and test with `/search <movie>`
-3. **Deploy**: Use in production for instant movie delivery
-4. **Monitor**: Check `/status` for cache statistics
-5. **Scale**: System automatically handles more users and movies
-
-This implementation transforms your movie bot from a "download-on-demand" system to an "instant-delivery" system, dramatically improving user experience while maintaining all existing functionality! 🎉
-
+**No manual intervention required!** The system is fully automated.
