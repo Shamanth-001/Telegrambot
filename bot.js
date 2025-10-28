@@ -21,7 +21,7 @@ process.on('unhandledRejection', (err) => console.error('[UNHANDLED]', err));
 process.on('uncaughtException', (err) => console.error('[EXCEPTION]', err));
 
 async function main() {
-  try {
+  try {   
     if (!BOT_TOKEN) {
       throw new Error('BOT_TOKEN is required');
     }

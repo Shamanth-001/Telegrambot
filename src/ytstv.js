@@ -59,7 +59,7 @@ export async function searchYTSTV(query, options = {}) {
   const q = String(query || '').trim();
   if (!q) return [];
 
-  const base = 'https://ytstv.hair';
+  const base = 'https://ytstv.hair/';
   const candidates = [
     `${base}/?s=${encodeURIComponent(q)}`,
     `${base}/search?q=${encodeURIComponent(q)}`
