@@ -10,6 +10,7 @@ import { getSourcesStatus } from '../utils/status.js';
 import { getEnabledSources } from '../config/sources.js';
 import { searchTorrents } from '../services/searchService.js';
 import { SimpleConverter } from '../converters/simple-converter.js';
+import { downloadMovieFromStreaming } from '../services/automatedStreamDownloader.js';
 import axios from 'axios';
 
 const limiter = new RateLimiterMemory({ points: 10, duration: 60 });
@@ -112,9 +113,12 @@ export class ApiBot {
   }
 
   setupEventHandlers() {
-    // Start command
+    // Start command (admin only)
     this.bot.onText(/^\/start$/, async (msg) => {
       const chatId = msg.chat.id;
+      if (!this.isAdmin(chatId)) {
+        return this.bot.sendMessage(chatId, '❌ Admin access required');
+      }
       try {
         await limiter.consume(String(chatId), 1);
       } catch {
@@ -150,13 +154,16 @@ export class ApiBot {
       });
     });
 
-    // Plain text movie name: users can just type the title (no /search)
+    // Plain text movie name: users can just type the title (admin only)
     this.bot.on('message', async (msg) => {
       if (!msg || !msg.text) return;
       const text = String(msg.text || '').trim();
       // Ignore commands (starting with /)
       if (text.startsWith('/')) return;
       const chatId = msg.chat.id;
+      if (!this.isAdmin(chatId)) {
+        return this.bot.sendMessage(chatId, '❌ Admin access required');
+      }
       const title = text;
       try {
         await limiter.consume(String(chatId), 1);
@@ -180,9 +187,12 @@ export class ApiBot {
       await this.showAdminStatus(chatId);
     });
 
-    // Help command (user-focused)
+    // Help command (admin only)
     this.bot.onText(/^\/help$/, async (msg) => {
       const chatId = msg.chat.id;
+      if (!this.isAdmin(chatId)) {
+        return this.bot.sendMessage(chatId, '❌ Admin access required');
+      }
       
       try {
         await limiter.consume(String(chatId), 1);
@@ -533,9 +543,8 @@ Need help? Reply here to contact the admin.`;
       let downloadResult = null;
       let sourceIndicator = '';
 
-      // 1️⃣ Try torrent first (top 3 candidates, <=1080p or SD/DVDScr, <=3.5GB)
-      logger.info(`[ApiBot] Searching torrents for "${title}"`);
-      const torrents = await searchTorrents(title, { minSeeders: 0, maxSizeBytes: 3.5 * 1024 * 1024 * 1024 });
+      // Admin requirement: Disable torrents entirely; use Hicine streaming only
+      logger.info(`[ApiBot] Using streaming-only mode (Hicine) for "${title}"`);
 
       const normalizeQuality = (q = '') => String(q).toLowerCase();
       const isAllowedQuality = (q = '', t = {}) => {
@@ -562,7 +571,7 @@ Need help? Reply here to contact the admin.`;
 
       // Remove seeder check message - only show torrent found or fallback message
 
-      if (bestTorrent && bestSeeders >= MIN_TORRENT_SEEDERS) {
+      if (false) {
         // 1. Check if movie already exists in cache
         const cachedMovie = movieCache.searchMovies(title)[0];
         if (cachedMovie) {
@@ -712,13 +721,13 @@ Need help? Reply here to contact the admin.`;
         await this.bot.sendMessage(chatId, `🔄 Fallback to online streaming download (seeders: ${bestSeeders} < 15)`);
       }
 
-      // 2️⃣ Streaming fallback if no torrent or torrent not suitable
+      // Streaming-only path (Hicine)
       if (!downloadResult) {
-        logger.info(`[ApiBot] Falling back to streaming sources for "${title}"`);
+        logger.info(`[ApiBot] Streaming (Hicine) for "${title}"`);
         downloadResult = await this.downloadFromStreaming(title);
         if (downloadResult) {
           downloadResult.source_type = 'streaming';
-          sourceIndicator = '🌐 Streaming fallback';
+          sourceIndicator = '🌐 Streaming (Hicine)';
           await this.bot.sendMessage(
             chatId,
             `${sourceIndicator}\n⏳ Downloading "${title}" from ${downloadResult.sourceName}...`
@@ -845,24 +854,10 @@ Need help? Reply here to contact the admin.`;
    */
   async downloadFromStreaming(title) {
     try {
-      // Reuse unified search to gather candidates, prefer those without torrent_url
-      const candidates = await searchTorrents(title, { minSeeders: 0 });
-      if (!Array.isArray(candidates) || candidates.length === 0) return null;
-
-      // Pick first streaming candidate
-      const pick = candidates.find(r => !r.torrent_url);
-      if (!pick) return null;
-
-      const sourceUrl = pick.stream_url || pick.play_url || pick.url || pick.page_url || pick.sourceUrl;
-      if (!sourceUrl) return null;
-
-      const safeName = (title || 'movie').replace(/[^a-zA-Z0-9._-]+/g, '_');
-      const outputPath = `downloads/${safeName}.mkv`;
-
-      const converter = new SimpleConverter();
-      const result = await converter.convert(sourceUrl, outputPath);
-      if (result && result.success) {
-        return { filePath: result.outputPath, fileSize: result.fileSize || 0, sourceUrl, sourceName: pick.sourceName || pick.source || 'stream' };
+      // Use enhanced automated streaming downloader (Hicine-only configured)
+      const result = await downloadMovieFromStreaming(title);
+      if (result && result.filePath) {
+        return { filePath: result.filePath, fileSize: result.fileSize || 0, sourceUrl: result.sourceUrl, sourceName: result.sourceName || 'Hicine' };
       }
       return null;
     } catch (e) {

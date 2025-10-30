@@ -45,8 +45,14 @@ class MovieCache {
     try {
       const { title, file_id, message_id, channel_id, file_size, source_type, source_url, ttl_hours = 24 } = movieData;
       
-      const expires_at = new Date();
-      expires_at.setHours(expires_at.getHours() + ttl_hours);
+      // When ttl_hours <= 0, do not set an expiry (infinite TTL)
+      const expiresIso = (typeof ttl_hours === 'number' && ttl_hours <= 0)
+        ? null
+        : (() => {
+            const expires_at = new Date();
+            expires_at.setHours(expires_at.getHours() + ttl_hours);
+            return expires_at.toISOString();
+          })();
 
       const stmt = this.db.prepare(`
         INSERT OR REPLACE INTO movies 
@@ -54,9 +60,9 @@ class MovieCache {
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
-      stmt.run(title, file_id, message_id, channel_id, file_size, source_type, source_url, expires_at.toISOString());
+      stmt.run(title, file_id, message_id, channel_id, file_size, source_type, source_url, expiresIso);
       
-      console.log(`[MovieCache] Added movie: ${title} (expires: ${expires_at.toISOString()})`);
+      console.log(`[MovieCache] Added movie: ${title}${expiresIso ? ` (expires: ${expiresIso})` : ' (no expiry)'}`);
       return true;
     } catch (error) {
       console.error('[MovieCache] Error adding movie:', error);
