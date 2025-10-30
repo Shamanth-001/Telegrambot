@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { logger } from './src/logger.js';
+import { logger } from './src/utils/logger.js';
 import { startBot } from './src/bot/index.js';
 import { startHealthServer } from './src/health.js';
 

@@ -12,6 +12,7 @@ const sources = [
   { name: 'Flixer', key: 'flixer' },
   { name: 'MkvCinemas', key: 'mkvcinemas' },
   { name: 'Cineby', key: 'cineby' },
+  { name: 'Hicine', key: 'hicine' },
 ];
 
 function getBreaker(key) {
@@ -33,4 +34,12 @@ export async function getSourcesStatus() {
       nextAttemptTs: br.nextAttemptTs
     };
   });
+}
+
+export async function checkSourceAvailability() {
+  const statuses = await getSourcesStatus();
+  return statuses.reduce((acc, s) => {
+    acc[s.key] = s.isOpen;
+    return acc;
+  }, {});
 }

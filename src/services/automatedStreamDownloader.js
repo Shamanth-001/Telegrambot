@@ -10,6 +10,11 @@ const execPromise = util.promisify(exec);
 // Streaming sites configuration
 const sites = [
   {
+    name: 'Hicine',
+    searchUrl: 'https://hicine.info/search/{query}',
+    selectors: ['.movie-item a', '.film-item a', 'a[href*="/movie/"]', 'a[href*="/watch/"]']
+  },
+  {
     name: 'Einthusan',
     searchUrl: 'https://einthusan.tv/movie/results/?lang=kannada&query={query}',
     selectors: ['a[href*="/movie/watch/"]']

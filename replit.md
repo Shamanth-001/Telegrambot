@@ -1,35 +1,34 @@
-# AI-Enhanced Telegram Movie Bot (Python)
+# Advanced Telegram Movie Bot (Node.js)
 
 ## Project Overview
-A sophisticated two-tier Telegram bot system that delivers movies instantly through intelligent caching and AI-powered search. Users get movies in <1 second if cached, or automatic download if not available.
+An enterprise-level Telegram bot for instant movie delivery with advanced caching, multi-source fallback, and ultra-fast downloads. Users get movies in <1 second if cached, or automatic download from 10+ streaming sources.
 
 ## Current State
-- **Status**: Ready for setup (requires configuration)
-- **Python Version**: 3.11
-- **Architecture**: Two-tier bot system (BOT1 + BOT2)
-- **Main Entry Point**: `run_both_bots.py`
+- **Status**: ✅ Running and configured
+- **Node.js Version**: 20.19.3
+- **Architecture**: Single bot with integrated cache system
+- **Main Entry Point**: `bot.js`
 
-## Two-Tier Architecture
+## Architecture
 
-### BOT1 (User Interface Bot)
-- Receives user requests via Telegram
-- Checks movie cache database (SQLite)
-- Delivers cached movies instantly (<1 second)
-- Requests downloads from BOT2 for new movies
-- AI-powered natural language understanding (optional)
+### Integrated Bot System
+- Single Node.js bot handling both user interface and downloads
+- SQLite-based cache system with 24-hour TTL
+- Private Telegram channel for file storage
+- Automatic cleanup and cache management
+- Health monitoring on port 3000
+- File server on port 8080 for direct downloads
 
-### BOT2 (Downloader API Bot)
-- FastAPI server running on port 8002
-- Downloads movies from 5+ streaming sources
-- Handles torrent downloads
-- Uploads movies to private Telegram channel
-- Updates cache database
-- Background processing with queue management
+### Download Priority System
+1. **Cache Check** - Instant delivery if available (<1 second)
+2. **Torrents** - YTS, PirateBay, 1337x, RARBG
+3. **Streaming Sites** - Hicine, Einthusan, Cataz, Fmovies, HDToday, etc.
+4. **Automatic Fallback** - If one source fails, tries next automatically
 
 ### Private Channel (Storage)
 - Telegram-hosted unlimited file storage
 - All downloaded movies cached here
-- Only bots have access as administrators
+- Automatic 24-hour TTL management
 - Free, reliable, and scalable
 
 ## Key Features
@@ -48,14 +47,18 @@ A sophisticated two-tier Telegram bot system that delivers movies instantly thro
 - 24/7 availability without server storage
 
 ### 🌐 Multi-Source Downloads
-Downloads from 5+ streaming platforms:
-1. **fmovies** - International movies & TV shows
-2. **cataz** - Multi-language content
-3. **einthusan** - South Indian movies
-4. **mkvcinemas** - Bollywood & regional cinema
-5. **ytstv** - High-quality torrents
+Downloads from 10+ streaming platforms:
+1. **Hicine** - Latest movies & TV shows (NEW!)
+2. **Einthusan** - South Indian movies
+3. **Cataz** - Multi-language content
+4. **Fmovies** - International content
+5. **HDToday** - High-quality streams
+6. **Yesmovies** - Popular releases
+7. **Putlocker** - Classic movies
+8. **Solarmovie** - Wide selection
+9. **Movie4K** - European content
 
-Plus YTS torrent API with quality preferences
+Plus torrent sources: YTS, PirateBay, 1337x, RARBG
 
 ### 🛡️ Anti-Bot Bypass
 - Playwright headless browser automation
@@ -70,23 +73,16 @@ Plus YTS torrent API with quality preferences
 ## Required Environment Variables
 
 ### Telegram Configuration (Required)
-```bash
-BOT1_TOKEN=<your_bot1_token>          # From @BotFather
-BOT2_TOKEN=<your_bot2_token>          # From @BotFather
-CHANNEL_ID=<your_channel_id>          # Private channel ID (starts with -100)
-ADMIN_USER_ID=<your_telegram_user_id> # Your Telegram user ID
-```
+All three secrets are configured and stored securely in Replit Secrets:
+- ✅ **BOT_TOKEN** - Your Telegram bot token from @BotFather
+- ✅ **CACHE_CHANNEL_ID** - Private channel ID (starts with -100)
+- ✅ **ADMIN_USER_ID** - Your Telegram user ID
 
-### API Configuration (Optional)
+### Optional Configuration
 ```bash
-OPENAI_API_KEY=<your_openai_key>      # For AI features (optional)
-BOT2_API_URL=http://localhost:8002     # BOT2 API endpoint (default)
-```
-
-### Download Configuration (Optional)
-```bash
-DOWNLOAD_DIR=./downloads              # Temporary download directory
-MAX_CONCURRENT_DOWNLOADS=5            # Parallel downloads
+LOG_LEVEL=info                        # Logging level (default: info)
+HEALTH_PORT=3000                      # Health check port (default: 3000)
+MAX_CONCURRENT_DOWNLOADS=3            # Parallel downloads (default: 3)
 ```
 
 ## Setup Instructions
@@ -223,13 +219,12 @@ All dependencies are installed via pip:
 - **Utilities**: fuzzywuzzy, python-Levenshtein, python-dotenv
 
 ## Recent Changes
-- ✅ **NEW DOWNLOAD PRIORITY**: Torrents checked FIRST (>15 seeders), then streaming fallback
-- ✅ Seed threshold increased from 5 to 15 for better quality
-- ✅ Added .torrent file upload to cache channel
-- ✅ Fixed critical bug: handle torrents without valid torrent_url
-- ✅ Cleaned up Node.js implementation (removed bot.js, src/)
-- ✅ Project now Python-only with two-tier architecture
-- ✅ All dependencies installed and ready
+- ✅ **NEW**: Added Hicine.info support for downloading movies
+- ✅ **Fixed**: Bot startup issues and missing exports
+- ✅ **Configured**: All required Replit Secrets (BOT_TOKEN, CACHE_CHANNEL_ID, ADMIN_USER_ID)
+- ✅ **Upgraded**: Node.js 20 for latest features and compatibility
+- ✅ **Running**: Bot is active and monitoring Telegram for commands
+- ✅ **Ready**: Cache system, health monitoring, and file server all operational
 
 ## Next Steps
 1. Configure Replit Secrets with bot tokens and channel ID

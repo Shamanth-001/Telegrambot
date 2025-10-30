@@ -165,6 +165,18 @@ async function loadExtractors() {
   const extractors = [];
   
   try {
+    // Try to load Hicine extractor
+    const hicineExtractor = await import('./extractors/hicine.js');
+    extractors.push({
+      name: 'hicine',
+      match: hicineExtractor.match,
+      getStreamUrls: hicineExtractor.getStreamUrls
+    });
+  } catch (error) {
+    logger.debug(`[PuppeteerFFmpeg] Hicine extractor not available: ${error.message}`);
+  }
+  
+  try {
     // Try to load Einthusan extractor
     const einthusanExtractor = await import('./extractors/einthusan.js');
     extractors.push({
@@ -186,6 +198,18 @@ async function loadExtractors() {
     });
   } catch (error) {
     logger.debug(`[PuppeteerFFmpeg] Cataz extractor not available: ${error.message}`);
+  }
+
+  try {
+    // Try to load Fmovies extractor
+    const fmoviesExtractor = await import('./extractors/fmovies.js');
+    extractors.push({
+      name: 'fmovies',
+      match: fmoviesExtractor.match,
+      getStreamUrls: fmoviesExtractor.getStreamUrls
+    });
+  } catch (error) {
+    logger.debug(`[PuppeteerFFmpeg] Fmovies extractor not available: ${error.message}`);
   }
 
   try {
