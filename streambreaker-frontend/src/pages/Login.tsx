@@ -96,7 +96,7 @@ export default function Login() {
             </h2>
             <p className="text-gray-400 mt-1">
               {isSignUp
-                ? 'Join CineVault and start your journey'
+                ? 'Join StreamBreaker and start your journey'
                 : 'Sign in to access your watchlist and more'
               }
             </p>
@@ -202,7 +202,7 @@ export default function Login() {
 
           {/* Google Sign In */}
           <button
-            onClick={() => signInWithGoogle('CineVault')}
+            onClick={() => signInWithGoogle('StreamBreaker')}
             className="w-full flex items-center justify-center gap-3 py-3.5 bg-white/5 border border-white/10 text-white font-semibold rounded-xl hover:bg-white/10 transition-all duration-300"
           >
             <svg className="w-5 h-5" viewBox="0 0 24 24">

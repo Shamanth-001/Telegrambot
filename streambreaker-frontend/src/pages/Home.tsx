@@ -165,7 +165,7 @@ export default function Home() {
               <div className="text-center md:text-left">
                 <div className="flex items-center justify-center md:justify-start gap-2 mb-3">
                   <Sparkles className="w-6 h-6 text-amber-400" />
-                  <h3 className="text-2xl font-bold text-white">Join CineVault Today</h3>
+                  <h3 className="text-2xl font-bold text-white">Join StreamBreaker Today</h3>
                 </div>
                 <p className="text-gray-300 max-w-lg">
                   Create your watchlist, rate your favorites, and get personalized recommendations. 

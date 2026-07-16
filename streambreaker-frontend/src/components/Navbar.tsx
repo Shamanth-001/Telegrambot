@@ -39,7 +39,7 @@ export default function Navbar() {
               <Film className="w-6 h-6 text-white" />
             </div>
             <span className="text-xl font-bold text-white hidden sm:block">
-              Cine<span className="text-amber-500">Vault</span>
+              Stream<span className="text-amber-500">Breaker</span>
             </span>
           </Link>
 

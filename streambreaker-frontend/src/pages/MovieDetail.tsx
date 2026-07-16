@@ -185,7 +185,7 @@ export default function MovieDetail() {
       try {
         await navigator.share({
           title: movie.title,
-          text: `Check out ${movie.title} on CineVault!`,
+          text: `Check out ${movie.title} on StreamBreaker!`,
           url: window.location.href,
         });
       } catch {}
@@ -567,7 +567,7 @@ export default function MovieDetail() {
               </a>
               
               <a
-                href={`https://t.me/share/url?url=${encodeURIComponent(movie.telegram_link)}&text=${encodeURIComponent(`Check out ${movie.title} on CineVault!`)}`}
+                href={`https://t.me/share/url?url=${encodeURIComponent(movie.telegram_link)}&text=${encodeURIComponent(`Check out ${movie.title} on StreamBreaker!`)}`}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="flex items-center justify-center gap-2 w-full px-6 py-4 bg-white/5 border border-white/10 text-white font-semibold rounded-xl hover:bg-white/10 transition-colors"
@@ -578,7 +578,7 @@ export default function MovieDetail() {
             </div>
             
             <p className="mt-6 text-xs text-gray-500">
-              💡 Join our Telegram bot @CineVaultBot for instant notifications about new releases!
+              💡 Join our Telegram bot @StreamBreakerBot for instant notifications about new releases!
             </p>
           </motion.div>
         </div>

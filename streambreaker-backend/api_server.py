@@ -316,3 +316,191 @@ async def get_requests(secret: str = ""):
             for r in pending
         ]
     }
+
+# ============ STREAMBREAKER FRONTEND SUPPORT ENDPOINTS ============
+
+def get_local_media_map(tmdb_ids):
+    if not tmdb_ids:
+        return {}
+    from db_manager import DBManager
+    db = DBManager()
+    cursor = db.conn.cursor()
+    ids = [i for i in tmdb_ids if i is not None]
+    if not ids:
+        return {}
+    placeholders = ",".join("?" for _ in ids)
+    try:
+        cursor.execute(f'''
+            SELECT tmdb_id, title, year, media_type, message_link, quality, size_bytes
+            FROM media
+            WHERE tmdb_id IN ({placeholders})
+        ''', ids)
+        rows = cursor.fetchall()
+        return {
+            row[0]: {
+                "title": row[1],
+                "year": row[2],
+                "media_type": row[3],
+                "message_link": row[4],
+                "quality": row[5],
+                "size_bytes": row[6]
+            }
+            for row in rows if row[0] is not None
+        }
+    except Exception as e:
+        print(f"Error querying local DB: {e}")
+        return {}
+
+def map_tmdb_to_react(item, local_map={}):
+    tmdb_id = item.get("id")
+    title = item.get("title") or item.get("name") or "Unknown Title"
+    description = item.get("overview") or ""
+    
+    poster_path = item.get("poster_path")
+    backdrop_path = item.get("backdrop_path")
+    poster_url = f"https://image.tmdb.org/t/p/w500{poster_path}" if poster_path else ""
+    backdrop_url = f"https://image.tmdb.org/t/p/original{backdrop_path}" if backdrop_path else ""
+    
+    rating = round(item.get("vote_average", 0.0), 1)
+    
+    release_date = item.get("release_date") or item.get("first_air_date") or ""
+    release_year = 2024
+    if release_date:
+        try:
+            release_year = int(release_date.split("-")[0])
+        except Exception:
+            pass
+            
+    media_type = item.get("media_type", "movie")
+    if media_type not in ["movie", "tv"]:
+        media_type = "movie"
+        
+    local_item = local_map.get(tmdb_id)
+    if local_item:
+        telegram_link = local_item["message_link"]
+    else:
+        telegram_link = f"https://t.me/StreamBreakerBot?start={media_type}_{tmdb_id}"
+        
+    return {
+        "id": tmdb_id,
+        "title": title,
+        "description": description,
+        "poster_url": poster_url,
+        "backdrop_url": backdrop_url,
+        "rating": rating,
+        "genre": "Movie" if media_type == "movie" else "Series",
+        "release_year": release_year,
+        "telegram_link": telegram_link,
+        "trending_score": item.get("popularity", 0.0),
+        "views": int(item.get("popularity", 0.0) * 10)
+    }
+
+@app.get("/api/movies")
+async def get_movies(
+    sort: str = "trending",
+    limit: int = 12,
+    genre: str = "all",
+    mood: str = "all",
+    search: str = "",
+    page: int = 1
+):
+    results = []
+    async with aiohttp.ClientSession() as session:
+        if search:
+            async with session.get(f"{TMDB_BASE}/search/multi", params={
+                "api_key": TMDB_KEY,
+                "query": search,
+                "page": page,
+                "include_adult": "false"
+            }) as resp:
+                data = await resp.json()
+                results = [i for i in data.get("results", []) if i.get("media_type") in ["movie", "tv"]]
+        else:
+            if sort == "trending":
+                async with session.get(f"{TMDB_BASE}/trending/all/day", params={
+                    "api_key": TMDB_KEY,
+                    "page": page
+                }) as resp:
+                    data = await resp.json()
+                    results = data.get("results", [])
+            else:
+                url = f"{TMDB_BASE}/discover/movie"
+                params = {
+                    "api_key": TMDB_KEY,
+                    "sort_by": "vote_average.desc" if sort == "rating" else "primary_release_date.desc",
+                    "page": page,
+                    "include_adult": "false"
+                }
+                if genre != "all" and genre != "":
+                    params["with_genres"] = genre
+                async with session.get(url, params=params) as resp:
+                    data = await resp.json()
+                    results = data.get("results", [])
+                    for item in results:
+                        item["media_type"] = "movie"
+
+    tmdb_ids = [item.get("id") for item in results if item.get("id")]
+    local_map = get_local_media_map(tmdb_ids)
+    
+    movies = [map_tmdb_to_react(item, local_map) for item in results[:limit]]
+    return {"data": movies}
+
+@app.get("/api/movies/{tmdb_id}")
+async def get_movie_detail(tmdb_id: int):
+    data = None
+    media_type = "movie"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(f"{TMDB_BASE}/movie/{tmdb_id}", params={"api_key": TMDB_KEY, "append_to_response": "credits"}) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                media_type = "movie"
+            else:
+                async with session.get(f"{TMDB_BASE}/tv/{tmdb_id}", params={"api_key": TMDB_KEY, "append_to_response": "credits"}) as resp2:
+                    if resp2.status == 200:
+                        data = await resp2.json()
+                        media_type = "tv"
+                        
+    if not data:
+        return {"error": "Movie not found."}
+        
+    data["media_type"] = media_type
+    local_map = get_local_media_map([tmdb_id])
+    movie = map_tmdb_to_react(data, local_map)
+    
+    credits = data.get("credits", {})
+    cast = [member.get("name") for member in credits.get("cast", [])[:5]]
+    movie["cast"] = cast
+    
+    if data.get("runtime"):
+        movie["duration"] = f"{data.get('runtime')} min"
+    elif data.get("episode_run_time") and len(data.get("episode_run_time")) > 0:
+        movie["duration"] = f"{data.get('episode_run_time')[0]} min"
+        
+    return {"data": movie}
+
+@app.get("/api/genres")
+async def get_genres():
+    async with aiohttp.ClientSession() as session:
+        async with session.get(f"{TMDB_BASE}/genre/movie/list", params={"api_key": TMDB_KEY}) as resp:
+            return await resp.json()
+
+@app.get("/api/watchlist")
+async def get_watchlist():
+    return []
+
+@app.post("/api/watchlist")
+async def add_to_watchlist():
+    return {"status": "ok"}
+
+@app.delete("/api/watchlist")
+async def remove_from_watchlist():
+    return {"status": "ok"}
+
+@app.get("/api/reviews")
+async def get_reviews(movie_id: int):
+    return []
+
+@app.post("/api/reviews")
+async def add_review():
+    return {"status": "ok"}
+
