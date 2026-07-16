@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>StreamBreaker Player</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap');
+        *{margin:0;padding:0;box-sizing:border-box}
+        body{font-family:'Inter',sans-serif;background:#0a0a0f;color:#fff;height:100vh;height:100dvh;overflow:hidden;display:flex;flex-direction:column}
+        .top-bar{display:flex;align-items:center;justify-content:space-between;padding:0.4rem 0.8rem;background:rgba(10,10,15,0.95);backdrop-filter:blur(20px);border-bottom:1px solid rgba(255,255,255,0.06);z-index:100;flex-shrink:0}
+        .back-btn{display:flex;align-items:center;gap:0.3rem;padding:0.35rem 0.7rem;border-radius:0.5rem;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.08);color:#94a3b8;font-size:0.72rem;font-weight:600;cursor:pointer;transition:all 0.2s;text-decoration:none}
+        .back-btn:hover{background:rgba(255,255,255,0.1);color:#fff}
+        .brand-text{font-size:0.8rem;font-weight:700;background:linear-gradient(135deg,#a855f7,#ec4899);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+        .server-controls{display:flex;align-items:center;gap:0.4rem}
+        .server-badge{font-size:0.6rem;padding:0.2rem 0.5rem;border-radius:2rem;background:rgba(34,197,94,0.15);color:#4ade80;border:1px solid rgba(34,197,94,0.2);font-weight:600;display:flex;align-items:center;gap:0.25rem}
+        .dot{width:5px;height:5px;border-radius:50%;background:#4ade80;animation:pulse 2s infinite}
+        @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}
+        .switch-btn{padding:0.3rem 0.55rem;border-radius:0.4rem;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.08);color:#64748b;font-size:0.65rem;font-weight:600;cursor:pointer;transition:all 0.2s}
+        .switch-btn:hover{background:rgba(168,85,247,0.15);color:#a855f7;border-color:rgba(168,85,247,0.3)}
+        .player-wrapper{flex:1;position:relative;background:#000;overflow:hidden}
+        .player-wrapper iframe{width:100%;height:100%;border:none}
+        .loading-overlay{position:absolute;inset:0;background:#0a0a0f;display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:50;transition:opacity 0.5s}
+        .loading-overlay.done{opacity:0;pointer-events:none}
+        .spinner{width:36px;height:36px;border:3px solid rgba(168,85,247,0.2);border-top-color:#a855f7;border-radius:50%;animation:spin 0.8s linear infinite;margin-bottom:0.8rem}
+        @keyframes spin{to{transform:rotate(360deg)}}
+        .load-text{font-size:0.8rem;color:#64748b;font-weight:500}
+        .load-sub{font-size:0.65rem;color:#334155;margin-top:0.25rem}
+        .server-modal{display:none;position:fixed;inset:0;z-index:200;background:rgba(0,0,0,0.8);backdrop-filter:blur(8px);align-items:center;justify-content:center}
+        .server-modal.open{display:flex}
+        .server-list{background:rgba(15,15,25,0.98);border:1px solid rgba(255,255,255,0.08);border-radius:1rem;padding:1.2rem;width:88%;max-width:300px;box-shadow:0 25px 60px rgba(0,0,0,0.6)}
+        .server-list h3{font-size:0.85rem;font-weight:700;margin-bottom:0.8rem;color:#e2e8f0}
+        .srv-opt{display:flex;align-items:center;justify-content:space-between;padding:0.6rem 0.8rem;border-radius:0.6rem;margin-bottom:0.3rem;cursor:pointer;transition:all 0.2s;border:1px solid transparent}
+        .srv-opt:hover{background:rgba(168,85,247,0.08);border-color:rgba(168,85,247,0.2)}
+        .srv-opt.active{background:rgba(168,85,247,0.12);border-color:rgba(168,85,247,0.3)}
+        .srv-name{font-size:0.75rem;font-weight:600;color:#e2e8f0}
+        .srv-desc{font-size:0.6rem;color:#64748b;margin-top:0.1rem}
+        .srv-tag{font-size:0.6rem;font-weight:600;padding:0.15rem 0.4rem;border-radius:1rem}
+        .tag-best{background:rgba(34,197,94,0.15);color:#4ade80}
+        .tag-good{background:rgba(59,130,246,0.15);color:#60a5fa}
+        .tag-ok{background:rgba(250,204,21,0.15);color:#facc15}
+        .close-modal{margin-top:0.6rem;width:100%;padding:0.6rem;border-radius:0.6rem;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);color:#94a3b8;font-size:0.75rem;font-weight:600;cursor:pointer;transition:all 0.2s}
+        .close-modal:hover{background:rgba(255,255,255,0.1);color:#fff}
+    </style>
+</head>
+<body>
+    <div class="top-bar">
+        <a class="back-btn" onclick="goBack()">&#8592; Back</a>
+        <span class="brand-text">StreamBreaker</span>
+        <div class="server-controls">
+            <div class="server-badge" id="badge"><span class="dot"></span><span id="badge-text">Server 1</span></div>
+            <button class="switch-btn" onclick="openModal()">Switch</button>
+        </div>
+    </div>
+    <div class="player-wrapper" id="pw">
+        <div class="loading-overlay" id="loader">
+            <div class="spinner"></div>
+            <div class="load-text">Loading player...</div>
+            <div class="load-sub" id="loadsub">Finding best server</div>
+        </div>
+        <iframe id="player" allowfullscreen allow="autoplay; fullscreen; picture-in-picture; encrypted-media" referrerpolicy="no-referrer-when-downgrade"></iframe>
+    </div>
+    <div class="server-modal" id="modal">
+        <div class="server-list">
+            <h3>&#128421;&#65039; Switch Server</h3>
+            <div id="srv-opts"></div>
+            <button class="close-modal" onclick="closeModal()">Cancel</button>
+        </div>
+    </div>
+<script>
+const P=new URLSearchParams(location.search);
+const id=P.get('id'), type=P.get('type')||'movie', ttl=decodeURIComponent(P.get('title')||'');
+document.title=(ttl||'Watch')+' — StreamBreaker';
+
+const S=[
+  {n:'VidSrc Pro',d:'Best quality, minimal ads',u:`https://vidsrc.pro/embed/${type}/${id}`,t:'best',l:'Best'},
+  {n:'VidSrc',d:'Fast & reliable',u:`https://vidsrc.to/embed/${type}/${id}`,t:'best',l:'Fast'},
+  {n:'AutoEmbed',d:'Multiple sources',u:`https://autoembed.co/${type}/tmdb/${id}`,t:'good',l:'Good'},
+  {n:'SuperEmbed',d:'Wide compatibility',u:`https://multiembed.mov/?video_id=${id}&tmdb=1`,t:'good',l:'Good'},
+  {n:'VidSrc XYZ',d:'Fallback option',u:`https://vidsrc.xyz/embed/${type}/${id}`,t:'ok',l:'OK'}
+];
+
+let ci=0;
+const pl=document.getElementById('player'),ld=document.getElementById('loader');
+
+// Block popups from iframe
+window.open=function(){return null};
+
+// Auto-load best server
+function init(){
+    if(!id){document.getElementById('loadsub').textContent='No movie ID';return}
+    document.getElementById('loadsub').textContent='Trying '+S[0].n+'...';
+    loadSrv(0);
+}
+
+function loadSrv(i){
+    ci=i;
+    const s=S[i];
+    document.getElementById('loadsub').textContent='Loading '+s.n+'...';
+    ld.classList.remove('done');
+    pl.src=s.u;
+    document.getElementById('badge-text').textContent=s.n;
+    const b=document.getElementById('badge');
+    const c=s.t==='best'?['rgba(34,197,94,0.15)','#4ade80','rgba(34,197,94,0.2)']:s.t==='good'?['rgba(59,130,246,0.15)','#60a5fa','rgba(59,130,246,0.2)']:['rgba(250,204,21,0.15)','#facc15','rgba(250,204,21,0.2)'];
+    b.style.background=c[0];b.style.color=c[1];b.style.borderColor=c[2];
+    b.querySelector('.dot').style.background=c[1];
+    pl.onload=function(){setTimeout(function(){ld.classList.add('done')},600)};
+    setTimeout(function(){ld.classList.add('done')},4000);
+    renderOpts();
+}
+
+function renderOpts(){
+    const c=document.getElementById('srv-opts');c.innerHTML='';
+    S.forEach(function(s,i){
+        const d=document.createElement('div');
+        d.className='srv-opt'+(i===ci?' active':'');
+        d.onclick=function(){loadSrv(i);closeModal()};
+        d.innerHTML='<div><div class="srv-name">'+s.n+(i===ci?' ✓':'')+'</div><div class="srv-desc">'+s.d+'</div></div><span class="srv-tag tag-'+s.t+'">'+s.l+'</span>';
+        c.appendChild(d);
+    });
+}
+
+function openModal(){document.getElementById('modal').classList.add('open')}
+function closeModal(){document.getElementById('modal').classList.remove('open')}
+document.getElementById('modal').addEventListener('click',function(e){if(e.target===this)closeModal()});
+
+function goBack(){
+    if(window.Telegram&&window.Telegram.WebApp){window.Telegram.WebApp.close();return}
+    if(history.length>1)history.back();else location.href='/';
+}
+
+document.addEventListener('keydown',function(e){
+    if(e.key==='Escape'){
+        if(document.getElementById('modal').classList.contains('open'))closeModal();
+        else goBack();
+    }
+});
+
+init();
+</script>
+</body>
+</html>
