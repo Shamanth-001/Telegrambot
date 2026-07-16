@@ -50,8 +50,6 @@ export default function MovieDetail() {
   const [loading, setLoading] = useState(true);
   const [inWatchlist, setInWatchlist] = useState(false);
   const [showTrailer, setShowTrailer] = useState(false);
-  const [showWatchModal, setShowWatchModal] = useState(false);
-  const [currentServerIndex, setCurrentServerIndex] = useState(0);
   const [showTelegramModal, setShowTelegramModal] = useState(false);
   
   // Review form state
@@ -374,18 +372,13 @@ export default function MovieDetail() {
 
             {/* Action Buttons */}
             <div className="flex flex-wrap gap-3 mb-8">
-              <button
-                onClick={() => {
-                  setShowWatchModal(true);
-                  try {
-                    window.open = function() { return null; };
-                  } catch {}
-                }}
+              <a
+                href={`/watch.html?id=${movie.id}&type=${mediaType}&title=${encodeURIComponent(movie.title)}`}
                 className="flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-red-600 to-orange-600 text-white font-bold rounded-xl hover:from-red-700 hover:to-orange-700 transition-all duration-300 transform hover:scale-105"
               >
                 <Play className="w-5 h-5" fill="white" />
                 Watch Now
-              </button>
+              </a>
 
               {movie.trailer_url && (
                 <button
@@ -608,60 +601,7 @@ export default function MovieDetail() {
         </div>
       )}
 
-      {/* Watch Modal */}
-      {showWatchModal && (
-        <div className="fixed inset-0 z-50 flex flex-col bg-[#0a0a0f]" onClick={() => setShowWatchModal(false)}>
-          {/* Header Bar */}
-          <div className="flex items-center justify-between px-4 py-3 bg-[#0c0c12] border-b border-white/5" onClick={(e) => e.stopPropagation()}>
-            <button
-              onClick={() => setShowWatchModal(false)}
-              className="flex items-center gap-2 px-3 py-1.5 bg-white/5 border border-white/10 rounded-lg text-sm text-gray-400 font-semibold hover:bg-white/10 hover:text-white transition-colors"
-            >
-              <ArrowLeft className="w-4 h-4" /> Back
-            </button>
-            <span className="text-md font-bold text-white tracking-wide">
-              Streaming: <span className="text-amber-500">{movie.title}</span>
-            </span>
-            <div className="flex items-center gap-3">
-              {/* Server selector */}
-              <div className="flex rounded-lg overflow-hidden border border-white/10">
-                {SERVERS.map((server, idx) => (
-                  <button
-                    key={server.name}
-                    onClick={() => setCurrentServerIndex(idx)}
-                    className={`px-3 py-1.5 text-xs font-semibold border-r border-white/5 last:border-r-0 transition-colors ${
-                      idx === currentServerIndex
-                        ? 'bg-amber-500 text-black'
-                        : 'bg-white/5 text-gray-400 hover:bg-white/10 hover:text-white'
-                    }`}
-                  >
-                    {server.name}
-                  </button>
-                ))}
-              </div>
-              <button
-                onClick={() => setShowWatchModal(false)}
-                className="p-1.5 text-gray-400 hover:text-white transition-colors"
-              >
-                <X className="w-6 h-6" />
-              </button>
-            </div>
-          </div>
-          
-          {/* Iframe Wrapper */}
-          <div className="flex-1 w-full h-full bg-black relative" onClick={(e) => e.stopPropagation()}>
-            <iframe
-              src={SERVERS[currentServerIndex].url(mediaType, movie.id)}
-              title={`Streaming: ${movie.title}`}
-              className="w-full h-full border-0"
-              allowFullScreen
-              allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
-              referrerPolicy="no-referrer-when-downgrade"
-              sandbox="allow-scripts allow-same-origin allow-presentation allow-forms"
-            />
-          </div>
-        </div>
-      )}
+
     </div>
   );
 }
