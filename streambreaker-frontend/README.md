@@ -1,22 +1,73 @@
-# StreamBreaker Frontend
+# React + TypeScript + Vite
 
-This directory contains the static frontend files for StreamBreaker.
+This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
 
-## Deployment on Netlify (Free & No Account Required)
+Currently, two official plugins are available:
 
-1. **Configure the API URL**:
-   - Open [index.html](file:///c:/telegrambot/streambreaker-frontend/index.html) and search for `API_BASE_URL` (around line 650).
-   - Replace `'https://streambreaker-api.onrender.com'` with your actual Render API URL.
+- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
+- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
 
-2. **Deploy via Netlify Drop**:
-   - Go to **[Netlify Drop](https://app.netlify.com/drop)** in your web browser.
-   - Drag and drop this entire `streambreaker-frontend` folder onto the page.
-   - In less than 10 seconds, Netlify will generate a live URL for your app (e.g., `https://streambreaker.netlify.app`).
+## React Compiler
 
-## Testing Locally
+The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
 
-- Simply double-click `index.html` to open it in a web browser, or run a local static server:
-  ```bash
-  npx serve .
-  ```
-- If your backend is running locally at `http://localhost:8000`, the frontend will automatically connect to it.
+## Expanding the ESLint configuration
+
+If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+
+```js
+export default defineConfig([
+  globalIgnores(['dist']),
+  {
+    files: ['**/*.{ts,tsx}'],
+    extends: [
+      // Other configs...
+
+      // Remove tseslint.configs.recommended and replace with this
+      tseslint.configs.recommendedTypeChecked,
+      // Alternatively, use this for stricter rules
+      tseslint.configs.strictTypeChecked,
+      // Optionally, add this for stylistic rules
+      tseslint.configs.stylisticTypeChecked,
+
+      // Other configs...
+    ],
+    languageOptions: {
+      parserOptions: {
+        project: ['./tsconfig.node.json', './tsconfig.app.json'],
+        tsconfigRootDir: import.meta.dirname,
+      },
+      // other options...
+    },
+  },
+])
+```
+
+You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+
+```js
+// eslint.config.js
+import reactX from 'eslint-plugin-react-x'
+import reactDom from 'eslint-plugin-react-dom'
+
+export default defineConfig([
+  globalIgnores(['dist']),
+  {
+    files: ['**/*.{ts,tsx}'],
+    extends: [
+      // Other configs...
+      // Enable lint rules for React
+      reactX.configs['recommended-typescript'],
+      // Enable lint rules for React DOM
+      reactDom.configs.recommended,
+    ],
+    languageOptions: {
+      parserOptions: {
+        project: ['./tsconfig.node.json', './tsconfig.app.json'],
+        tsconfigRootDir: import.meta.dirname,
+      },
+      // other options...
+    },
+  },
+])
+```
