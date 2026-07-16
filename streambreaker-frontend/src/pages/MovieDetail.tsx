@@ -657,6 +657,7 @@ export default function MovieDetail() {
               allowFullScreen
               allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
               referrerPolicy="no-referrer-when-downgrade"
+              sandbox="allow-scripts allow-same-origin allow-presentation allow-forms"
             />
           </div>
         </div>
