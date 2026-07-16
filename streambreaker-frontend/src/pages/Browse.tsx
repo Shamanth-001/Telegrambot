@@ -46,8 +46,38 @@ export default function Browse() {
   }, []);
 
   useEffect(() => {
+    const controller = new AbortController();
+    
+    const fetchMovies = async () => {
+      setLoading(true);
+      try {
+        const params = new URLSearchParams();
+        if (selectedGenre !== 'all') params.set('genre', selectedGenre);
+        if (selectedMood !== 'all') params.set('mood', selectedMood);
+        params.set('sort', selectedSort);
+        params.set('limit', '50');
+        if (searchQuery) params.set('search', searchQuery);
+        
+        const res = await fetch(`/api/movies?${params.toString()}`, { signal: controller.signal });
+        const data = await res.json();
+        setMovies(data.data || []);
+      } catch (err: any) {
+        if (err.name !== 'AbortError') {
+          console.error('Error fetching movies:', err);
+        }
+      } finally {
+        if (!controller.signal.aborted) {
+          setLoading(false);
+        }
+      }
+    };
+
     fetchMovies();
     updateURL();
+
+    return () => {
+      controller.abort();
+    };
   }, [selectedGenre, selectedMood, selectedSort, searchQuery]);
 
   const updateURL = () => {
@@ -66,26 +96,6 @@ export default function Browse() {
       setGenres(data);
     } catch (err) {
       console.error('Error fetching genres:', err);
-    }
-  };
-
-  const fetchMovies = async () => {
-    setLoading(true);
-    try {
-      const params = new URLSearchParams();
-      if (selectedGenre !== 'all') params.set('genre', selectedGenre);
-      if (selectedMood !== 'all') params.set('mood', selectedMood);
-      params.set('sort', selectedSort);
-      params.set('limit', '50');
-      if (searchQuery) params.set('search', searchQuery);
-      
-      const res = await fetch(`/api/movies?${params.toString()}`);
-      const data = await res.json();
-      setMovies(data.data || []);
-    } catch (err) {
-      console.error('Error fetching movies:', err);
-    } finally {
-      setLoading(false);
     }
   };
 

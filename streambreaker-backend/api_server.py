@@ -476,7 +476,7 @@ async def get_movie_detail(tmdb_id: int):
     elif data.get("episode_run_time") and len(data.get("episode_run_time")) > 0:
         movie["duration"] = f"{data.get('episode_run_time')[0]} min"
         
-    return {"data": movie}
+    return movie
 
 @app.get("/api/genres")
 async def get_genres():
