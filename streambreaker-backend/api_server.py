@@ -498,7 +498,31 @@ async def remove_from_watchlist():
 
 @app.get("/api/reviews")
 async def get_reviews(movie_id: int):
-    return []
+    # Try movie reviews first
+    async with aiohttp.ClientSession() as session:
+        async with session.get(f"{TMDB_BASE}/movie/{movie_id}/reviews", params={"api_key": TMDB_KEY}) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+            else:
+                # Try TV reviews
+                async with session.get(f"{TMDB_BASE}/tv/{movie_id}/reviews", params={"api_key": TMDB_KEY}) as resp2:
+                    if resp2.status == 200:
+                        data = await resp2.json()
+                    else:
+                        data = {"results": []}
+                        
+    reviews = []
+    for r in data.get("results", [])[:5]:
+        author_details = r.get("author_details", {})
+        rating = author_details.get("rating")
+        reviews.append({
+            "id": r.get("id"),
+            "author": r.get("author", "Anonymous"),
+            "rating": rating if rating is not None else 8.0,
+            "comment": r.get("content", ""),
+            "created_at": r.get("created_at", "")
+        })
+    return reviews
 
 @app.post("/api/reviews")
 async def add_review():
