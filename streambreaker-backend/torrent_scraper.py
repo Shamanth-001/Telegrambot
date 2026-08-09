@@ -1,6 +1,6 @@
 """
 StreamBreaker Torrent Scraper
-Scrapes 1337x and YTS for movie/series torrent links in real-time.
+Scrapes 1337x and The Pirate Bay for movie/series torrent links in real-time.
 Returns structured results with quality, size, seeders, and magnet links.
 """
 
@@ -14,11 +14,22 @@ from urllib.parse import quote_plus, urljoin
 
 logger = logging.getLogger(__name__)
 
-# --- Headers to mimic a real browser ---
+# --- Headers to mimic a real Chrome browser ---
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate",
+    "Connection": "keep-alive",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
+    "Cache-Control": "max-age=0",
+    "sec-ch-ua": '"Chromium";v="126", "Google Chrome";v="126", "Not-A.Brand";v="8"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
 }
 
 # 1337x mirrors (fallback chain)
@@ -27,6 +38,13 @@ MIRRORS_1337X = [
     "https://1337x.st",
     "https://1337x.gd",
     "https://1337x.ws",
+    "https://1377x.to",
+]
+
+# TPB / Pirate Bay API proxies
+APIBAY_URLS = [
+    "https://apibay.org",
+    "https://tpb.party",
 ]
 
 
@@ -55,34 +73,35 @@ def _detect_quality(title: str) -> str:
         return "720p"
     if "480P" in t:
         return "480p"
-    if "CAM" in t or "HDCAM" in t or "TS" in t or "HDTS" in t:
+    if "CAM" in t or "HDCAM" in t or "HDTS" in t or "TELESYNC" in t:
         return "CAM"
     return "Unknown"
 
 
-def _parse_size(size_str: str) -> float:
-    """Convert size string like '1.5 GB' to float MB for sorting."""
-    try:
-        parts = size_str.strip().split()
-        val = float(parts[0])
-        unit = parts[1].upper() if len(parts) > 1 else "MB"
-        if "GB" in unit:
-            return val * 1024
-        elif "KB" in unit:
-            return val / 1024
-        return val  # MB
-    except Exception:
-        return 0
+def _format_size(size_bytes: int) -> str:
+    """Convert bytes to human-readable size string."""
+    if size_bytes <= 0:
+        return "Unknown"
+    gb = size_bytes / (1024 ** 3)
+    if gb >= 1:
+        return f"{gb:.1f} GB"
+    mb = size_bytes / (1024 ** 2)
+    return f"{mb:.0f} MB"
 
 
 # ============================================================
 # 1337x Scraper
 # ============================================================
 
-async def _fetch_html(session: aiohttp.ClientSession, url: str) -> Optional[str]:
+async def _fetch_html(session: aiohttp.ClientSession, url: str, timeout: int = 15) -> Optional[str]:
     """Fetch HTML from a URL with error handling."""
     try:
-        async with session.get(url, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+        async with session.get(
+            url,
+            headers=HEADERS,
+            timeout=aiohttp.ClientTimeout(total=timeout),
+            ssl=False,  # Skip SSL verification for mirrors
+        ) as resp:
             if resp.status == 200:
                 return await resp.text()
             logger.warning(f"HTTP {resp.status} from {url}")
@@ -93,10 +112,9 @@ async def _fetch_html(session: aiohttp.ClientSession, url: str) -> Optional[str]
 
 def _extract_1337x_links(html: str, base_url: str) -> list[str]:
     """Extract torrent detail page links from 1337x search results using regex."""
-    # Pattern matches links like /torrent/12345/Movie-Name/
     pattern = r'href="(/torrent/\d+/[^"]+/)"'
     matches = re.findall(pattern, html)
-    return [urljoin(base_url, m) for m in matches[:15]]  # Limit to 15
+    return [urljoin(base_url, m) for m in matches[:12]]
 
 
 def _extract_1337x_magnet(html: str) -> Optional[str]:
@@ -109,17 +127,14 @@ def _extract_1337x_info(html: str) -> dict:
     """Extract size, seeders, leechers from 1337x detail page."""
     info = {"size": "Unknown", "seeders": 0, "leechers": 0}
 
-    # Size - look in the info list
     size_match = re.search(r'<li>\s*<strong>Total size</strong>\s*<span>([\d.]+ [A-Za-z]+)</span>', html)
     if size_match:
         info["size"] = size_match.group(1)
 
-    # Seeders
     seed_match = re.search(r'<span class="seeds">\s*(\d+)\s*</span>', html)
     if seed_match:
         info["seeders"] = int(seed_match.group(1))
 
-    # Leechers
     leech_match = re.search(r'<span class="leeches">\s*(\d+)\s*</span>', html)
     if leech_match:
         info["leechers"] = int(leech_match.group(1))
@@ -139,7 +154,6 @@ async def _scrape_1337x_detail(session: aiohttp.ClientSession, url: str) -> Opti
 
     info = _extract_1337x_info(html)
 
-    # Extract title from the page
     title_match = re.search(r'<h1[^>]*>([^<]+)</h1>', html)
     title = title_match.group(1).strip() if title_match else url.split("/")[-2].replace("-", " ")
 
@@ -160,14 +174,21 @@ async def search_1337x(query: str, media_type: str = "movie") -> list[TorrentRes
     encoded = quote_plus(query)
     results = []
 
-    async with aiohttp.ClientSession() as session:
+    connector = aiohttp.TCPConnector(ssl=False)
+    async with aiohttp.ClientSession(connector=connector) as session:
         html = None
         used_base = MIRRORS_1337X[0]
 
         for mirror in MIRRORS_1337X:
             search_url = f"{mirror}/category-search/{encoded}/{category}/1/"
             html = await _fetch_html(session, search_url)
-            if html:
+            if html and "torrent" in html.lower():
+                used_base = mirror
+                break
+            # Also try plain search if category search fails
+            search_url = f"{mirror}/search/{encoded}/1/"
+            html = await _fetch_html(session, search_url)
+            if html and "torrent" in html.lower():
                 used_base = mirror
                 break
 
@@ -179,11 +200,11 @@ async def search_1337x(query: str, media_type: str = "movie") -> list[TorrentRes
         if not links:
             return results
 
-        # Fetch detail pages concurrently (max 5 at a time)
-        sem = asyncio.Semaphore(5)
+        sem = asyncio.Semaphore(3)
 
         async def fetch_with_sem(url):
             async with sem:
+                await asyncio.sleep(0.3)  # Small delay between requests
                 return await _scrape_1337x_detail(session, url)
 
         tasks = [fetch_with_sem(link) for link in links]
@@ -197,27 +218,110 @@ async def search_1337x(query: str, media_type: str = "movie") -> list[TorrentRes
 
 
 # ============================================================
-# YTS Scraper (uses their public API — no HTML scraping needed)
+# APIBay (The Pirate Bay API) — JSON API, no HTML scraping
+# ============================================================
+
+async def search_apibay(query: str, media_type: str = "movie") -> list[TorrentResult]:
+    """Search via APIBay (TPB proxy API). Returns JSON directly."""
+    results = []
+    encoded = quote_plus(query)
+    # Categories: 201 = Movies, 205 = TV Shows
+    cat = "201" if media_type == "movie" else "205"
+
+    connector = aiohttp.TCPConnector(ssl=False)
+    async with aiohttp.ClientSession(connector=connector) as session:
+        data = None
+        for base_url in APIBAY_URLS:
+            api_url = f"{base_url}/q.php?q={encoded}&cat={cat}"
+            try:
+                async with session.get(
+                    api_url,
+                    headers=HEADERS,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                    ssl=False,
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data and len(data) > 0 and data[0].get("id") != "0":
+                            break
+                        data = None
+            except Exception as e:
+                logger.warning(f"APIBay error ({base_url}): {e}")
+                continue
+
+        if not data:
+            return results
+
+        trackers = [
+            "udp://tracker.opentrackr.org:1337/announce",
+            "udp://open.stealth.si:80/announce",
+            "udp://tracker.torrent.eu.org:451/announce",
+            "udp://explodie.org:6969/announce",
+            "udp://tracker.tiny-vps.com:6969/announce",
+            "udp://tracker.cyberia.is:6969/announce",
+        ]
+        tracker_str = "&".join([f"tr={t}" for t in trackers])
+
+        for item in data[:15]:
+            if item.get("id") == "0":
+                continue
+
+            info_hash = item.get("info_hash", "")
+            name = item.get("name", "Unknown")
+            seeders = int(item.get("seeders", 0))
+            leechers = int(item.get("leechers", 0))
+            size_bytes = int(item.get("size", 0))
+
+            if seeders == 0 or not info_hash:
+                continue
+
+            magnet = f"magnet:?xt=urn:btih:{info_hash}&dn={quote_plus(name)}&{tracker_str}"
+
+            results.append(TorrentResult(
+                title=name,
+                quality=_detect_quality(name),
+                size=_format_size(size_bytes),
+                seeders=seeders,
+                leechers=leechers,
+                magnet=magnet,
+                source="TPB",
+            ))
+
+    return results
+
+
+# ============================================================
+# YTS Scraper (public API)
 # ============================================================
 
 async def search_yts(query: str) -> list[TorrentResult]:
     """Search YTS API for movie torrents. YTS only has movies, not series."""
     results = []
-    api_url = "https://yts.mx/api/v2/list_movies.json"
 
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(api_url, params={
-                "query_term": query,
-                "limit": 10,
-                "sort_by": "seeds",
-            }, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                if resp.status != 200:
-                    return results
-                data = await resp.json()
-    except Exception as e:
-        logger.warning(f"YTS API error: {e}")
-        return results
+    yts_domains = ["https://yts.mx", "https://yts.lt", "https://yts.bz"]
+
+    connector = aiohttp.TCPConnector(ssl=False)
+    async with aiohttp.ClientSession(connector=connector) as session:
+        data = None
+        for domain in yts_domains:
+            api_url = f"{domain}/api/v2/list_movies.json"
+            try:
+                async with session.get(api_url, params={
+                    "query_term": query,
+                    "limit": 10,
+                    "sort_by": "seeds",
+                }, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=10), ssl=False) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data.get("data", {}).get("movies"):
+                            break
+                        data = None
+            except Exception as e:
+                logger.warning(f"YTS API error ({domain}): {e}")
+                continue
+
+        if not data:
+            return results
 
     movies = data.get("data", {}).get("movies") or []
 
@@ -225,7 +329,6 @@ async def search_yts(query: str) -> list[TorrentResult]:
         torrents = movie.get("torrents", [])
         movie_title = movie.get("title_long", movie.get("title", "Unknown"))
         for t in torrents:
-            # YTS provides torrent hashes, construct magnet links
             torrent_hash = t.get("hash", "")
             if not torrent_hash:
                 continue
@@ -238,7 +341,6 @@ async def search_yts(query: str) -> list[TorrentResult]:
                 f"&tr=udp://tracker.opentrackr.org:1337/announce"
                 f"&tr=udp://tracker.torrent.eu.org:451/announce"
                 f"&tr=udp://explodie.org:6969/announce"
-                f"&tr=udp://tracker.tiny-vps.com:6969/announce"
             )
 
             results.append(TorrentResult(
@@ -255,66 +357,6 @@ async def search_yts(query: str) -> list[TorrentResult]:
 
 
 # ============================================================
-# TorrentGalaxy Scraper
-# ============================================================
-
-async def search_torrentgalaxy(query: str, media_type: str = "movie") -> list[TorrentResult]:
-    """Search TorrentGalaxy for torrents."""
-    results = []
-    encoded = quote_plus(query)
-    # Category: 1 = Movies, 41 = TV
-    cat = "1" if media_type == "movie" else "41"
-    search_url = f"https://torrentgalaxy.to/torrents.php?search={encoded}&cat={cat}&sort=seeders&order=desc"
-
-    async with aiohttp.ClientSession() as session:
-        html = await _fetch_html(session, search_url)
-        if not html:
-            return results
-
-        # Extract rows — each torrent is in a div with class tgxtablerow
-        row_pattern = r'<div class="tgxtablerow[^"]*">(.*?)</div>\s*</div>\s*</div>\s*</div>'
-        # Simpler approach: extract magnet links and titles directly
-        magnet_pattern = r'href="(magnet:\?xt=urn:btih:[^"]+)"'
-        magnets = re.findall(magnet_pattern, html)
-
-        # Extract torrent names — they're in links with /torrent/ path
-        name_pattern = r'<a[^>]*href="/torrent/[^"]*"[^>]*title="([^"]*)"'
-        names = re.findall(name_pattern, html)
-
-        # Extract size — look for spans with size info
-        size_pattern = r'<span class="badge badge-secondary[^"]*">\s*([\d.]+ [A-Z]+)\s*</span>'
-        sizes = re.findall(size_pattern, html)
-
-        # Extract seeders/leechers
-        seed_pattern = r'<font color="green"[^>]*>\s*<b>(\d+)</b>'
-        seeds = re.findall(seed_pattern, html)
-        leech_pattern = r'<font color="red"[^>]*>\s*<b>(\d+)</b>'
-        leeches = re.findall(leech_pattern, html)
-
-        count = min(len(magnets), len(names), 15)
-        for i in range(count):
-            seeders = int(seeds[i]) if i < len(seeds) else 0
-            leechers = int(leeches[i]) if i < len(leeches) else 0
-            size = sizes[i] if i < len(sizes) else "Unknown"
-            title = names[i]
-
-            if seeders == 0:
-                continue
-
-            results.append(TorrentResult(
-                title=title,
-                quality=_detect_quality(title),
-                size=size,
-                seeders=seeders,
-                leechers=leechers,
-                magnet=magnets[i],
-                source="TorrentGalaxy",
-            ))
-
-    return results
-
-
-# ============================================================
 # Main search function — combines all sources
 # ============================================================
 
@@ -323,12 +365,13 @@ async def search_torrents(query: str, media_type: str = "movie") -> list[Torrent
     Search all torrent sources in parallel and return combined, deduplicated results
     sorted by seeders (highest first).
     """
-    tasks = [search_1337x(query, media_type)]
+    tasks = [
+        search_1337x(query, media_type),
+        search_apibay(query, media_type),
+    ]
 
     if media_type == "movie":
         tasks.append(search_yts(query))
-
-    tasks.append(search_torrentgalaxy(query, media_type))
 
     all_results = await asyncio.gather(*tasks, return_exceptions=True)
 
