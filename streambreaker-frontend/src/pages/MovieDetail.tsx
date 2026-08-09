@@ -11,9 +11,10 @@ import { useAuth } from '../contexts/AuthContext';
 import supabase from '../lib/supabase';
 
 interface Review {
-  id: number;
-  movie_id: number;
-  user_id: string;
+  id: number | string;
+  movie_id?: number;
+  user_id?: string;
+  author?: string;
   rating: number;
   comment: string;
   created_at: string;
@@ -630,34 +631,45 @@ export default function MovieDetail() {
                 No reviews yet. Be the first to review!
               </div>
             ) : (
-              reviews.map((review) => (
-                <div
-                  key={review.id}
-                  className="bg-white/5 border border-white/10 rounded-xl p-5 hover:bg-white/[0.07] transition-colors"
-                >
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 rounded-full bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center text-white font-bold">
-                        {(review.users?.email || 'U')[0].toUpperCase()}
+              reviews.map((review) => {
+                const authorName = review.author || review.users?.display_name || review.users?.email?.split('@')[0] || 'Anonymous';
+                const initial = authorName[0]?.toUpperCase() || 'U';
+                const commentText = review.comment || '';
+                const isLong = commentText.length > 300;
+                
+                return (
+                  <div
+                    key={review.id}
+                    className="bg-white/5 border border-white/10 rounded-xl p-5 hover:bg-white/[0.07] transition-colors"
+                  >
+                    <div className="flex items-start justify-between gap-4">
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-full bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center text-white font-bold">
+                          {initial}
+                        </div>
+                        <div>
+                          <p className="font-medium text-white">
+                            {authorName}
+                          </p>
+                          <StarRating rating={review.rating} size="sm" showValue={false} />
+                        </div>
                       </div>
-                      <div>
-                        <p className="font-medium text-white">
-                          {review.users?.display_name || review.users?.email?.split('@')[0] || 'Anonymous'}
-                        </p>
-                        <StarRating rating={review.rating} size="sm" showValue={false} />
-                      </div>
+                      {review.created_at && (
+                        <span className="text-xs text-gray-500 whitespace-nowrap">
+                          {new Date(review.created_at).toLocaleDateString('en-US', {
+                            year: 'numeric', month: 'short', day: 'numeric',
+                          })}
+                        </span>
+                      )}
                     </div>
-                    <span className="text-xs text-gray-500 whitespace-nowrap">
-                      {new Date(review.created_at).toLocaleDateString('en-US', {
-                        year: 'numeric', month: 'short', day: 'numeric',
-                      })}
-                    </span>
+                    {commentText && (
+                      <p className="mt-3 text-gray-300 text-sm leading-relaxed">
+                        {isLong ? commentText.slice(0, 300) + '...' : commentText}
+                      </p>
+                    )}
                   </div>
-                  {review.comment && (
-                    <p className="mt-3 text-gray-300 text-sm leading-relaxed">{review.comment}</p>
-                  )}
-                </div>
-              ))
+                );
+              })
             )}
           </div>
         </section>

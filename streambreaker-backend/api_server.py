@@ -500,28 +500,39 @@ async def remove_from_watchlist():
 
 @app.get("/api/reviews")
 async def get_reviews(movie_id: int):
-    # Try movie reviews first
+    data = {"results": []}
     async with aiohttp.ClientSession() as session:
-        async with session.get(f"{TMDB_BASE}/movie/{movie_id}/reviews", params={"api_key": TMDB_KEY}) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-            else:
-                # Try TV reviews
-                async with session.get(f"{TMDB_BASE}/tv/{movie_id}/reviews", params={"api_key": TMDB_KEY}) as resp2:
-                    if resp2.status == 200:
-                        data = await resp2.json()
-                    else:
-                        data = {"results": []}
-                        
+        # Try movie reviews first, then TV
+        for endpoint in [f"movie/{movie_id}", f"tv/{movie_id}"]:
+            async with session.get(
+                f"{TMDB_BASE}/{endpoint}/reviews",
+                params={"api_key": TMDB_KEY, "page": 1}
+            ) as resp:
+                if resp.status == 200:
+                    result = await resp.json()
+                    if result.get("results"):
+                        data = result
+                        break
+
     reviews = []
-    for r in data.get("results", [])[:5]:
+    for r in data.get("results", [])[:10]:
         author_details = r.get("author_details", {})
-        rating = author_details.get("rating")
+        rating_10 = author_details.get("rating")
+        # Convert 10-scale to 5-scale for StarRating component
+        rating_5 = round(rating_10 / 2, 1) if rating_10 is not None else 4.0
+
+        # Clean content: strip markdown/HTML artifacts
+        content = r.get("content", "")
+        import re as _re
+        content = _re.sub(r'<[^>]+>', '', content)  # Strip HTML tags
+        content = _re.sub(r'\*\*|__|\#{1,6}\s?|>\s?', '', content)  # Strip markdown
+        content = content.strip()
+
         reviews.append({
             "id": r.get("id"),
             "author": r.get("author", "Anonymous"),
-            "rating": rating if rating is not None else 8.0,
-            "comment": r.get("content", ""),
+            "rating": rating_5,
+            "comment": content,
             "created_at": r.get("created_at", "")
         })
     return reviews
