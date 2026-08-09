@@ -1,2 +1,3 @@
-/api/*  https://telegrambot-p8yg.onrender.com/api/:splat  200
-/*      /index.html                                       200
+/api/*       https://telegrambot-p8yg.onrender.com/api/:splat  200
+/watch.html  /watch.html                                       200
+/*           /index.html                                       200
