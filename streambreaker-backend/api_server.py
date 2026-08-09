@@ -2,7 +2,9 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 import aiohttp
 import os
+import logging
 from dotenv import load_dotenv
+from torrent_scraper import search_torrents
 
 load_dotenv()
 
@@ -528,3 +530,62 @@ async def get_reviews(movie_id: int):
 async def add_review():
     return {"status": "ok"}
 
+
+# ============================================================
+# Torrent Search Endpoint
+# ============================================================
+
+@app.get("/api/torrents/search")
+async def torrent_search(
+    query: str = "",
+    tmdb_id: int = 0,
+    media_type: str = "movie",
+    season: int = 0,
+    episode: int = 0,
+):
+    """
+    Search for torrent links for a movie or TV show.
+    Can search by query string or tmdb_id (which resolves to a title via TMDB).
+    For series, optionally pass season and episode numbers.
+    """
+    poster_url = ""
+    search_query = query
+
+    # If tmdb_id provided, resolve title and poster from TMDB
+    if tmdb_id and not query:
+        endpoint = "movie" if media_type == "movie" else "tv"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{TMDB_BASE}/{endpoint}/{tmdb_id}",
+                    params={"api_key": TMDB_KEY},
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        search_query = data.get("title") or data.get("name") or ""
+                        poster_path = data.get("poster_path", "")
+                        if poster_path:
+                            poster_url = f"https://image.tmdb.org/t/p/w500{poster_path}"
+                        # For series, append season/episode info to query
+                        if media_type == "tv" and season:
+                            search_query += f" S{season:02d}"
+                            if episode:
+                                search_query += f"E{episode:02d}"
+        except Exception as e:
+            logging.warning(f"TMDB lookup failed for {tmdb_id}: {e}")
+
+    if not search_query:
+        return {"query": "", "results": [], "error": "No query or tmdb_id provided"}
+
+    try:
+        results = await search_torrents(search_query, media_type)
+    except Exception as e:
+        logging.error(f"Torrent search failed: {e}")
+        results = []
+
+    return {
+        "query": search_query,
+        "tmdb_id": tmdb_id if tmdb_id else None,
+        "poster_url": poster_url,
+        "results": [r.to_dict() for r in results[:20]],  # Cap at 20 results
+    }

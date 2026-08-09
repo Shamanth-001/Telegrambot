@@ -3,7 +3,7 @@ import { useParams, Link } from 'react-router-dom';
 import { 
   Star, Play, Heart, Share2, Calendar, Clock, Film, Users, 
   ArrowLeft, Send, Download, MessageSquare, ThumbsUp,
-  ExternalLink, X
+  ExternalLink, X, Magnet, HardDrive, Loader2, AlertCircle
 } from 'lucide-react';
 import { motion } from 'framer-motion';
 import StarRating from '../components/StarRating';
@@ -21,6 +21,16 @@ interface Review {
     email: string;
     display_name?: string;
   };
+}
+
+interface TorrentResult {
+  title: string;
+  quality: string;
+  size: string;
+  seeders: number;
+  leechers: number;
+  magnet: string;
+  source: string;
 }
 
 interface Movie {
@@ -58,11 +68,21 @@ export default function MovieDetail() {
   const [reviewComment, setReviewComment] = useState('');
   const [submittingReview, setSubmittingReview] = useState(false);
 
+  // Torrent state
+  const [torrents, setTorrents] = useState<TorrentResult[]>([]);
+  const [torrentsLoading, setTorrentsLoading] = useState(false);
+  const [torrentsError, setTorrentsError] = useState('');
+  const [torrentsLoaded, setTorrentsLoaded] = useState(false);
+
   useEffect(() => {
     if (id) {
       fetchMovie();
       fetchReviews();
       checkWatchlist();
+      // Reset torrent state on new movie
+      setTorrents([]);
+      setTorrentsLoaded(false);
+      setTorrentsError('');
     }
   }, [id, user]);
 
@@ -192,6 +212,28 @@ export default function MovieDetail() {
     } else {
       navigator.clipboard.writeText(window.location.href);
       alert('Link copied to clipboard!');
+    }
+  };
+
+  const fetchTorrents = async () => {
+    if (!movie || torrentsLoading) return;
+    setTorrentsLoading(true);
+    setTorrentsError('');
+    try {
+      const mt = movie.genre.toLowerCase() === 'series' ? 'tv' : 'movie';
+      const res = await fetch(`/api/torrents/search?tmdb_id=${movie.id}&media_type=${mt}`);
+      const data = await res.json();
+      if (data.results && data.results.length > 0) {
+        setTorrents(data.results);
+      } else {
+        setTorrentsError('No torrents found for this title.');
+      }
+    } catch (err) {
+      console.error('Error fetching torrents:', err);
+      setTorrentsError('Failed to search torrents. Backend may be sleeping.');
+    } finally {
+      setTorrentsLoading(false);
+      setTorrentsLoaded(true);
     }
   };
 
@@ -422,6 +464,107 @@ export default function MovieDetail() {
             </div>
           </motion.div>
         </div>
+
+        {/* Torrent Downloads Section */}
+        <section className="mt-12">
+          <div className="flex items-center gap-3 mb-6">
+            <Download className="w-6 h-6 text-amber-400" />
+            <h2 className="text-2xl font-bold text-white">Download</h2>
+            {torrents.length > 0 && (
+              <span className="px-2 py-0.5 bg-white/10 rounded-full text-sm text-gray-400">
+                {torrents.length} sources
+              </span>
+            )}
+          </div>
+
+          {!torrentsLoaded && !torrentsLoading ? (
+            <div className="bg-white/5 border border-white/10 rounded-2xl p-8 text-center">
+              <HardDrive className="w-12 h-12 text-gray-600 mx-auto mb-3" />
+              <p className="text-gray-300 mb-2">Search for download links</p>
+              <p className="text-gray-500 text-sm mb-5">
+                Searches multiple sources for the best quality torrent links
+              </p>
+              <button
+                onClick={fetchTorrents}
+                className="inline-flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-amber-500 to-orange-600 text-white font-bold rounded-xl hover:from-amber-600 hover:to-orange-700 transition-all duration-300 transform hover:scale-105"
+              >
+                <Download className="w-5 h-5" />
+                Search Torrents
+              </button>
+            </div>
+          ) : torrentsLoading ? (
+            <div className="bg-white/5 border border-white/10 rounded-2xl p-8 text-center">
+              <Loader2 className="w-10 h-10 text-amber-400 mx-auto mb-3 animate-spin" />
+              <p className="text-gray-300 font-medium">Searching torrent sites...</p>
+              <p className="text-gray-500 text-sm mt-1">Checking 1337x, YTS, TorrentGalaxy</p>
+            </div>
+          ) : torrentsError ? (
+            <div className="bg-white/5 border border-white/10 rounded-2xl p-8 text-center">
+              <AlertCircle className="w-10 h-10 text-gray-500 mx-auto mb-3" />
+              <p className="text-gray-400 mb-4">{torrentsError}</p>
+              <button
+                onClick={fetchTorrents}
+                className="inline-flex items-center gap-2 px-5 py-2.5 bg-white/10 text-white rounded-lg hover:bg-white/15 transition-colors text-sm"
+              >
+                Try Again
+              </button>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {torrents.map((t, idx) => {
+                const seedColor =
+                  t.seeders >= 100 ? 'text-green-400' :
+                  t.seeders >= 20 ? 'text-yellow-400' : 'text-red-400';
+                const qualityColor =
+                  t.quality === '4K' ? 'bg-purple-500/15 text-purple-400 border-purple-500/20' :
+                  t.quality === '1080p' ? 'bg-green-500/15 text-green-400 border-green-500/20' :
+                  t.quality === '720p' ? 'bg-blue-500/15 text-blue-400 border-blue-500/20' :
+                  'bg-white/10 text-gray-400 border-white/10';
+
+                return (
+                  <div
+                    key={idx}
+                    className="bg-white/5 border border-white/10 rounded-xl p-4 hover:bg-white/[0.07] transition-all group"
+                  >
+                    <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+                      {/* Title & Quality */}
+                      <div className="flex-1 min-w-0">
+                        <div className="flex flex-wrap items-center gap-2 mb-1">
+                          <span className={`px-2.5 py-0.5 text-xs font-bold rounded-md border ${qualityColor}`}>
+                            {t.quality}
+                          </span>
+                          <span className="px-2 py-0.5 text-xs font-medium rounded-md bg-white/5 text-gray-400 border border-white/10">
+                            {t.source}
+                          </span>
+                        </div>
+                        <p className="text-white text-sm font-medium truncate" title={t.title}>
+                          {t.title}
+                        </p>
+                      </div>
+
+                      {/* Stats */}
+                      <div className="flex items-center gap-4 text-xs shrink-0">
+                        <span className="text-gray-400">{t.size}</span>
+                        <span className={`font-semibold ${seedColor}`}>▲ {t.seeders}</span>
+                        <span className="text-gray-500">▼ {t.leechers}</span>
+                      </div>
+
+                      {/* Magnet Button */}
+                      <a
+                        href={t.magnet}
+                        className="flex items-center gap-1.5 px-4 py-2 bg-amber-500/15 border border-amber-500/25 text-amber-400 font-semibold rounded-lg hover:bg-amber-500/25 transition-all text-sm shrink-0"
+                        title="Open in torrent client"
+                      >
+                        <Magnet className="w-4 h-4" />
+                        Magnet
+                      </a>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </section>
 
         {/* Reviews Section */}
         <section className="mt-12">
