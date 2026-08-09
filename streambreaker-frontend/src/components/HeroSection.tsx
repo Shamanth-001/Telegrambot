@@ -25,12 +25,12 @@ export default function HeroSection({ movies }: HeroSectionProps) {
   const [direction, setDirection] = useState(0);
 
   useEffect(() => {
-    const timer = setInterval(() => {
+    const timer = setTimeout(() => {
       setDirection(1);
       setCurrent((prev) => (prev + 1) % movies.length);
     }, 7000);
-    return () => clearInterval(timer);
-  }, [movies.length]);
+    return () => clearTimeout(timer);
+  }, [current, movies.length]);
 
   const slideVariants = {
     enter: (dir: number) => ({ x: dir > 0 ? 1000 : -1000, opacity: 0 }),
