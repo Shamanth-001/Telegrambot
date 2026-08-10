@@ -477,6 +477,20 @@ async def get_movie_detail(tmdb_id: int):
         movie["duration"] = f"{data.get('runtime')} min"
     elif data.get("episode_run_time") and len(data.get("episode_run_time")) > 0:
         movie["duration"] = f"{data.get('episode_run_time')[0]} min"
+
+    # For TV shows, include season/episode info for torrent search
+    if media_type == "tv":
+        movie["number_of_seasons"] = data.get("number_of_seasons", 0)
+        seasons_raw = data.get("seasons", [])
+        movie["seasons"] = [
+            {
+                "season_number": s.get("season_number", 0),
+                "name": s.get("name", f"Season {s.get('season_number', 0)}"),
+                "episode_count": s.get("episode_count", 0),
+            }
+            for s in seasons_raw
+            if s.get("season_number", 0) > 0  # Skip "Specials" (season 0)
+        ]
         
     return movie
 
@@ -596,8 +610,12 @@ async def torrent_search(
     if not search_query:
         return {"query": "", "results": [], "error": "No query or tmdb_id provided"}
 
-    # Build the final search string: "Title Year" for accurate matching
-    torrent_query = f"{search_query} {year}".strip() if year else search_query
+    # Build the final search string: "Title Year" for movies only
+    # For TV shows, the S01/S01E01 suffix is enough — year hurts accuracy
+    if year and media_type == "movie":
+        torrent_query = f"{search_query} {year}"
+    else:
+        torrent_query = search_query
 
     try:
         results = await search_torrents(torrent_query, media_type)

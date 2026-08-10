@@ -34,6 +34,12 @@ interface TorrentResult {
   source: string;
 }
 
+interface SeasonInfo {
+  season_number: number;
+  name: string;
+  episode_count: number;
+}
+
 interface Movie {
   id: number;
   title: string;
@@ -51,6 +57,8 @@ interface Movie {
   mood_tags: string[];
   language: string;
   views: number;
+  number_of_seasons?: number;
+  seasons?: SeasonInfo[];
 }
 
 export default function MovieDetail() {
@@ -74,6 +82,11 @@ export default function MovieDetail() {
   const [torrentsLoading, setTorrentsLoading] = useState(false);
   const [torrentsError, setTorrentsError] = useState('');
   const [torrentsLoaded, setTorrentsLoaded] = useState(false);
+
+  // Season/Episode picker for series
+  const [selectedSeason, setSelectedSeason] = useState(1);
+  const [selectedEpisode, setSelectedEpisode] = useState(0); // 0 = full season pack
+  const isSeries = movie?.genre?.toLowerCase() === 'series' || (movie?.seasons && movie.seasons.length > 0);
 
   useEffect(() => {
     if (id) {
@@ -221,8 +234,15 @@ export default function MovieDetail() {
     setTorrentsLoading(true);
     setTorrentsError('');
     try {
-      const mt = movie.genre.toLowerCase() === 'series' ? 'tv' : 'movie';
-      const res = await fetch(`/api/torrents/search?tmdb_id=${movie.id}&media_type=${mt}`);
+      const mt = isSeries ? 'tv' : 'movie';
+      let url = `/api/torrents/search?tmdb_id=${movie.id}&media_type=${mt}`;
+      if (isSeries) {
+        url += `&season=${selectedSeason}`;
+        if (selectedEpisode > 0) {
+          url += `&episode=${selectedEpisode}`;
+        }
+      }
+      const res = await fetch(url);
       const data = await res.json();
       if (data.results && data.results.length > 0) {
         setTorrents(data.results);
@@ -478,12 +498,64 @@ export default function MovieDetail() {
             )}
           </div>
 
+          {/* Season/Episode Picker for Series */}
+          {isSeries && movie?.seasons && movie.seasons.length > 0 && (
+            <div className="bg-white/5 border border-white/10 rounded-xl p-4 mb-4">
+              <div className="flex flex-wrap items-center gap-3">
+                <div className="flex items-center gap-2">
+                  <label className="text-sm text-gray-400 font-medium">Season:</label>
+                  <select
+                    value={selectedSeason}
+                    onChange={(e) => {
+                      setSelectedSeason(Number(e.target.value));
+                      setSelectedEpisode(0);
+                      setTorrentsLoaded(false);
+                      setTorrents([]);
+                    }}
+                    className="px-3 py-1.5 bg-white/5 border border-white/10 rounded-lg text-white text-sm focus:outline-none focus:border-amber-500/50 cursor-pointer"
+                  >
+                    {movie.seasons.map((s) => (
+                      <option key={s.season_number} value={s.season_number} className="bg-[#1a1a2e]">
+                        {s.name} ({s.episode_count} eps)
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="flex items-center gap-2">
+                  <label className="text-sm text-gray-400 font-medium">Episode:</label>
+                  <select
+                    value={selectedEpisode}
+                    onChange={(e) => {
+                      setSelectedEpisode(Number(e.target.value));
+                      setTorrentsLoaded(false);
+                      setTorrents([]);
+                    }}
+                    className="px-3 py-1.5 bg-white/5 border border-white/10 rounded-lg text-white text-sm focus:outline-none focus:border-amber-500/50 cursor-pointer"
+                  >
+                    <option value={0} className="bg-[#1a1a2e]">Full Season Pack</option>
+                    {Array.from(
+                      { length: movie.seasons.find(s => s.season_number === selectedSeason)?.episode_count || 0 },
+                      (_, i) => i + 1
+                    ).map((ep) => (
+                      <option key={ep} value={ep} className="bg-[#1a1a2e]">
+                        Episode {ep}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+            </div>
+          )}
+
           {!torrentsLoaded && !torrentsLoading ? (
             <div className="bg-white/5 border border-white/10 rounded-2xl p-8 text-center">
               <HardDrive className="w-12 h-12 text-gray-600 mx-auto mb-3" />
               <p className="text-gray-300 mb-2">Search for download links</p>
               <p className="text-gray-500 text-sm mb-5">
-                Searches multiple sources for the best quality torrent links
+                {isSeries
+                  ? `Search torrents for S${String(selectedSeason).padStart(2, '0')}${selectedEpisode > 0 ? `E${String(selectedEpisode).padStart(2, '0')}` : ' (Full Season)'}`
+                  : 'Searches multiple sources for the best quality torrent links'
+                }
               </p>
               <button
                 onClick={fetchTorrents}
