@@ -89,6 +89,45 @@ def _format_size(size_bytes: int) -> str:
     return f"{mb:.0f} MB"
 
 
+def _normalize(text: str) -> str:
+    """Normalize a string for comparison: lowercase, remove punctuation, collapse spaces."""
+    t = text.lower()
+    t = re.sub(r'[^a-z0-9\s]', ' ', t)  # Replace non-alphanumeric with space
+    t = re.sub(r'\s+', ' ', t).strip()  # Collapse whitespace
+    return t
+
+
+def _relevance_score(query: str, torrent_title: str) -> float:
+    """
+    Score how relevant a torrent title is to the search query.
+    Returns 0.0-1.0 (1.0 = perfect match).
+    
+    Strategy:
+    - Extract meaningful keywords from the query (ignore year, common words)
+    - Check what fraction of query keywords appear in the torrent title
+    - Give bonus for exact phrase matches
+    """
+    q_norm = _normalize(query)
+    t_norm = _normalize(torrent_title)
+    
+    # Extract keywords (skip common noise words and years)
+    noise = {'the', 'a', 'an', 'of', 'and', 'in', 'to', 'for', 'on', 'at', 'by', 'is', 'it'}
+    q_words = [w for w in q_norm.split() if w not in noise and not re.match(r'^(19|20)\d{2}$', w)]
+    
+    if not q_words:
+        return 0.5  # Can't determine relevance
+    
+    # Count how many query words appear in the torrent title
+    matched = sum(1 for w in q_words if w in t_norm)
+    word_score = matched / len(q_words)
+    
+    # Bonus: check if the main title phrase (without year) appears as a substring
+    q_no_year = re.sub(r'\b(19|20)\d{2}\b', '', q_norm).strip()
+    phrase_bonus = 0.15 if q_no_year and q_no_year in t_norm else 0.0
+    
+    return min(1.0, word_score + phrase_bonus)
+
+
 # ============================================================
 # 1337x Scraper
 # ============================================================
@@ -363,7 +402,7 @@ async def search_yts(query: str) -> list[TorrentResult]:
 async def search_torrents(query: str, media_type: str = "movie") -> list[TorrentResult]:
     """
     Search all torrent sources in parallel and return combined, deduplicated results
-    sorted by seeders (highest first).
+    filtered by relevance and sorted by seeders (highest first).
     """
     tasks = [
         search_1337x(query, media_type),
@@ -392,7 +431,14 @@ async def search_torrents(query: str, media_type: str = "movie") -> list[Torrent
                 seen_hashes.add(info_hash)
             combined.append(r)
 
-    # Sort by seeders descending
-    combined.sort(key=lambda x: x.seeders, reverse=True)
+    # Filter by relevance — discard results below 50% match
+    scored = []
+    for r in combined:
+        score = _relevance_score(query, r.title)
+        if score >= 0.5:
+            scored.append((score, r))
 
-    return combined
+    # Sort: relevance first (desc), then seeders (desc)
+    scored.sort(key=lambda x: (x[0], x[1].seeders), reverse=True)
+
+    return [r for _, r in scored]

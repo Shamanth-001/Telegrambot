@@ -558,11 +558,13 @@ async def torrent_search(
     Search for torrent links for a movie or TV show.
     Can search by query string or tmdb_id (which resolves to a title via TMDB).
     For series, optionally pass season and episode numbers.
+    Appends the release year for accurate torrent matching.
     """
     poster_url = ""
     search_query = query
+    year = ""
 
-    # If tmdb_id provided, resolve title and poster from TMDB
+    # If tmdb_id provided, resolve title, year, and poster from TMDB
     if tmdb_id and not query:
         endpoint = "movie" if media_type == "movie" else "tv"
         try:
@@ -577,6 +579,12 @@ async def torrent_search(
                         poster_path = data.get("poster_path", "")
                         if poster_path:
                             poster_url = f"https://image.tmdb.org/t/p/w500{poster_path}"
+
+                        # Extract release year for accurate torrent matching
+                        release_date = data.get("release_date") or data.get("first_air_date") or ""
+                        if release_date and len(release_date) >= 4:
+                            year = release_date[:4]
+
                         # For series, append season/episode info to query
                         if media_type == "tv" and season:
                             search_query += f" S{season:02d}"
@@ -588,15 +596,19 @@ async def torrent_search(
     if not search_query:
         return {"query": "", "results": [], "error": "No query or tmdb_id provided"}
 
+    # Build the final search string: "Title Year" for accurate matching
+    torrent_query = f"{search_query} {year}".strip() if year else search_query
+
     try:
-        results = await search_torrents(search_query, media_type)
+        results = await search_torrents(torrent_query, media_type)
     except Exception as e:
         logging.error(f"Torrent search failed: {e}")
         results = []
 
     return {
-        "query": search_query,
+        "query": torrent_query,
         "tmdb_id": tmdb_id if tmdb_id else None,
         "poster_url": poster_url,
         "results": [r.to_dict() for r in results[:20]],  # Cap at 20 results
     }
+
