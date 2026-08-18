@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, Link, useSearchParams } from 'react-router-dom';
 import { 
   Star, Play, Heart, Share2, Calendar, Clock, Film, Users, 
   ArrowLeft, Send, Download, MessageSquare, ThumbsUp,
@@ -63,6 +63,8 @@ interface Movie {
 
 export default function MovieDetail() {
   const { id } = useParams<{ id: string }>();
+  const [searchParams] = useSearchParams();
+  const mediaTypeHint = searchParams.get('type') || '';
   const { user } = useAuth();
   const [movie, setMovie] = useState<Movie | null>(null);
   const [reviews, setReviews] = useState<Review[]>([]);
@@ -102,7 +104,8 @@ export default function MovieDetail() {
 
   const fetchMovie = async () => {
     try {
-      const res = await fetch(`/api/movies/${id}`);
+      const typeParam = mediaTypeHint ? `?type=${mediaTypeHint}` : '';
+      const res = await fetch(`/api/movies/${id}${typeParam}`);
       const data = await res.json();
       setMovie(data);
     } catch (err) {

@@ -448,19 +448,23 @@ async def get_movies(
     return {"data": movies}
 
 @app.get("/api/movies/{tmdb_id}")
-async def get_movie_detail(tmdb_id: int):
+async def get_movie_detail(tmdb_id: int, type: str = ""):
     data = None
     media_type = "movie"
+    
+    # Determine lookup order based on 'type' hint from frontend
+    if type == "tv":
+        endpoints = [("tv", f"{TMDB_BASE}/tv/{tmdb_id}"), ("movie", f"{TMDB_BASE}/movie/{tmdb_id}")]
+    else:
+        endpoints = [("movie", f"{TMDB_BASE}/movie/{tmdb_id}"), ("tv", f"{TMDB_BASE}/tv/{tmdb_id}")]
+    
     async with aiohttp.ClientSession() as session:
-        async with session.get(f"{TMDB_BASE}/movie/{tmdb_id}", params={"api_key": TMDB_KEY, "append_to_response": "credits"}) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                media_type = "movie"
-            else:
-                async with session.get(f"{TMDB_BASE}/tv/{tmdb_id}", params={"api_key": TMDB_KEY, "append_to_response": "credits"}) as resp2:
-                    if resp2.status == 200:
-                        data = await resp2.json()
-                        media_type = "tv"
+        for mt, url in endpoints:
+            async with session.get(url, params={"api_key": TMDB_KEY, "append_to_response": "credits"}) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    media_type = mt
+                    break
                         
     if not data:
         return {"error": "Movie not found."}

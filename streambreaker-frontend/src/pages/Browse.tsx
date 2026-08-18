@@ -311,7 +311,7 @@ export default function Browse() {
             {movies.map((movie, idx) => (
               <a
                 key={movie.id}
-                href={`/movie/${movie.id}`}
+                href={`/movie/${movie.id}${movie.genre?.toLowerCase() === 'series' ? '?type=tv' : ''}`}
                 className="flex items-center gap-4 p-4 bg-white/5 border border-white/10 rounded-xl hover:bg-white/[0.07] transition-all group"
               >
                 <img

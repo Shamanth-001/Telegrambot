@@ -104,26 +104,85 @@ def _relevance_score(query: str, torrent_title: str) -> float:
     
     Strategy:
     - Extract meaningful keywords from the query (ignore year, common words)
-    - Check what fraction of query keywords appear in the torrent title
+    - Use word-boundary matching (not substring) to avoid false positives
+    - Require ALL distinctive title words to be present for a high score
+    - Penalize when torrent has many extra meaningful words not in the query
     - Give bonus for exact phrase matches
     """
     q_norm = _normalize(query)
     t_norm = _normalize(torrent_title)
     
-    # Extract keywords (skip common noise words and years)
-    noise = {'the', 'a', 'an', 'of', 'and', 'in', 'to', 'for', 'on', 'at', 'by', 'is', 'it'}
-    q_words = [w for w in q_norm.split() if w not in noise and not re.match(r'^(19|20)\d{2}$', w)]
+    # Quick reject: adult content
+    if '18' in torrent_title and '+' in torrent_title:
+        return 0.0
+    
+    # Split into word sets for word-boundary matching
+    t_words = set(t_norm.split())
+    
+    # Extract keywords (skip common noise words, years, and season/episode tags)
+    noise = {'the', 'a', 'an', 'of', 'and', 'in', 'to', 'for', 'on', 'at', 'by', 'is', 'it', 'from'}
+    season_ep = set()
+    for i in range(1, 30):
+        season_ep.add(f's{i:02d}')
+        season_ep.add(f'e{i:02d}')
+    noise |= season_ep
+    
+    # Technical torrent words to ignore when comparing
+    tech_words = {'1080p', '720p', '480p', '2160p', '4k', 'uhd', 'hdr', 'bluray', 'brrip', 'webrip',
+                  'web', 'dl', 'dvdrip', 'hdtv', 'x264', 'x265', 'hevc', 'aac', 'ac3', 'dts',
+                  'yify', 'yts', 'rarbg', 'eztv', 'nf', 'amzn', 'imax', 'proper', 'remastered',
+                  'extended', 'directors', 'cut', 'complete', 'season', 'pack', 'dual', 'audio',
+                  'subs', 'subtitle', 'dubbed', 'multi', 'remux', 'encode', 'mkv', 'mp4', 'avi',
+                  'xvid', 'divx', '10bit', '5', '1', '7', 'opus', 'flac', 'truehd', 'atmos',
+                  'hq', 'ts', 'cam', 'hdcam', 'telesync', 'dvdscr', 'screener', 'av1',
+                  'nl', 'en', 'ru', 'fr', 'de', 'es', 'pt', 'hindi', 'english', 'tamil', 'telugu'}
+    
+    q_words = [w for w in q_norm.split() if w not in noise and not re.match(r'^(19|20)\d{2}$', w) and w not in tech_words]
     
     if not q_words:
         return 0.5  # Can't determine relevance
     
-    # Count how many query words appear in the torrent title
-    matched = sum(1 for w in q_words if w in t_norm)
+    # Distinctive words from torrent title (not noise, not tech)
+    t_meaningful = [w for w in t_norm.split() if w not in noise and w not in tech_words 
+                    and not re.match(r'^(19|20)\d{2}$', w) and len(w) >= 3]
+    
+    # Distinctive words from query
+    distinctive_words = [w for w in q_words if len(w) >= 3]
+    
+    # Word-boundary matching: check each query word against torrent word set
+    matched = 0
+    for w in q_words:
+        if w in t_words:
+            matched += 1
+        elif any(w in tw for tw in t_words if len(tw) > len(w)):
+            matched += 0.7
+    
     word_score = matched / len(q_words)
+    
+    # Strict check: ALL distinctive words (3+ chars) must be present
+    if len(distinctive_words) >= 2:
+        distinctive_matched = sum(1 for w in distinctive_words if w in t_words or 
+                                   any(w in tw for tw in t_words if len(tw) > len(w)))
+        distinctive_ratio = distinctive_matched / len(distinctive_words)
+        if distinctive_ratio < 0.75:
+            word_score *= 0.3
+    
+    # Extra word penalty: if torrent has many meaningful words NOT in the query,
+    # it's probably a different title (e.g., "Interstellar Wars" vs "Interstellar")
+    q_meaningful_set = set(distinctive_words)
+    extra_words = [w for w in t_meaningful if w not in q_meaningful_set 
+                   and not any(w in qw or qw in w for qw in q_meaningful_set)]
+    
+    if len(extra_words) >= 2 and len(distinctive_words) <= 2:
+        # Short query title but torrent has many extra words — probably wrong movie
+        word_score *= 0.4
+    elif len(extra_words) >= 3:
+        word_score *= 0.6
     
     # Bonus: check if the main title phrase (without year) appears as a substring
     q_no_year = re.sub(r'\b(19|20)\d{2}\b', '', q_norm).strip()
-    phrase_bonus = 0.15 if q_no_year and q_no_year in t_norm else 0.0
+    q_no_year = re.sub(r'\s+', ' ', q_no_year).strip()
+    phrase_bonus = 0.2 if q_no_year and q_no_year in t_norm else 0.0
     
     return min(1.0, word_score + phrase_bonus)
 

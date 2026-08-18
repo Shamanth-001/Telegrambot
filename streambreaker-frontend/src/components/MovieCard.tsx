@@ -89,7 +89,7 @@ export default function MovieCard({ movie, index = 0 }: MovieCardProps) {
       animate={{ opacity: 1, y: 0 }}
       transition={{ delay: index * 0.05, duration: 0.4 }}
     >
-      <Link to={`/movie/${movie.id}`} className="group block">
+      <Link to={`/movie/${movie.id}${movie.genre?.toLowerCase() === 'series' ? '?type=tv' : ''}`} className="group block">
         <div className="relative aspect-[2/3] rounded-xl overflow-hidden bg-[#1a1a24] shadow-lg group-hover:shadow-2xl group-hover:shadow-amber-500/10 transition-all duration-300 transform group-hover:-translate-y-2">
           {/* Poster Image */}
           <img

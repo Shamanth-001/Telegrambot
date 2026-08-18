@@ -164,7 +164,7 @@ export default function HeroSection({ movies }: HeroSectionProps) {
               }}
             >
               <Link
-                to={`/movie/${movie.id}`}
+                to={`/movie/${movie.id}${movie.genre?.toLowerCase() === 'series' ? '?type=tv' : ''}`}
                 className="group flex items-center gap-2 px-5 sm:px-8 py-3 sm:py-4 bg-gradient-to-r from-amber-500 to-orange-600 text-white font-bold rounded-xl hover:from-amber-600 hover:to-orange-700 transition-all duration-300 transform hover:scale-105 shadow-lg shadow-amber-500/25 text-sm sm:text-base"
               >
                 <Info className="w-4 h-4 sm:w-5 sm:h-5" />
