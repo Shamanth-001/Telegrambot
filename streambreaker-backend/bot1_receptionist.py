@@ -1,542 +1,528 @@
-import os
+"""
+bot1_receptionist.py — StreamBreaker Telegram bot.
+
+Flow:
+  user sends a name  ->  pick the right title (TMDB)  ->  poster + details
+  movie              ->  best magnet links (one per quality)
+  series             ->  pick season / episode  ->  magnet links
+
+Telegram buttons can't open magnet: URLs, so each link button opens
+/api/magnet/<hash> on the API, which hands the magnet to the torrent app.
+"Copy magnets" sends the raw links as tap-to-copy text.
+"""
+import html
 import logging
+import os
+from urllib.parse import quote
+
 import aiohttp
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder, ContextTypes, CommandHandler,
-    MessageHandler, filters, CallbackQueryHandler
-)
 from dotenv import load_dotenv
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.constants import ChatAction, ParseMode
+from telegram.ext import (
+    ApplicationBuilder, CallbackQueryHandler, CommandHandler, ContextTypes,
+    MessageHandler, filters,
+)
+
 from db_manager import DBManager
-from bot_utils import format_size
-from scraper import find_yts_links
+from query_parser import parse_query
+from torrent_scraper import pick_best, search_torrents, short_magnet
 
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT1_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_USER_ID"))
-CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
+ADMIN_ID = int(os.getenv("ADMIN_USER_ID") or 0)
 TMDB_KEY = os.getenv("TMDB_API_KEY")
+# Public URL of this API (serves /api/magnet/...). Telegram needs https here.
+API_PUBLIC_URL = os.getenv("API_PUBLIC_URL", "https://telegrambot-p8yg.onrender.com").rstrip("/")
+# Public URL of the website; website buttons are hidden when unset.
+SITE_URL = os.getenv("SITE_URL", "").rstrip("/")
 
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+TMDB_BASE = "https://api.themoviedb.org/3"
+
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 db = DBManager()
 
-# ============ TMDB LOOKUP ============
+TYPE_ICON = {"movie": "🎬", "tv": "📺"}
 
-async def lookup_tmdb(media_type, tmdb_id):
-    """Fetch movie/tv details from TMDB"""
-    url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, params={"api_key": TMDB_KEY}) as resp:
-            if resp.status == 200:
-                return await resp.json()
+
+# ============ TMDB ============
+
+async def tmdb(path: str, **params) -> dict | None:
+    try:
+        connector = None
+        if os.getenv("DNS_SERVERS"):  # same optional DNS override as api_server
+            connector = aiohttp.TCPConnector(resolver=aiohttp.AsyncResolver(
+                nameservers=[d.strip() for d in os.getenv("DNS_SERVERS").split(",")]))
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=12), connector=connector) as session:
+            async with session.get(f"{TMDB_BASE}{path}", params={"api_key": TMDB_KEY, **params}) as resp:
+                if resp.status == 200:
+                    return await resp.json()
+    except Exception as e:
+        logging.warning(f"TMDB {path}: {e}")
     return None
 
-# ============ COMMANDS ============
+
+def year_of(item: dict) -> str:
+    return (item.get("release_date") or item.get("first_air_date") or "")[:4]
+
+
+def esc(text) -> str:
+    return html.escape(str(text or ""))
+
+
+def site_link(path: str) -> str | None:
+    return f"{SITE_URL}{path}" if SITE_URL else None
+
+
+def magnet_page(info_hash: str, name: str) -> str:
+    return f"{API_PUBLIC_URL}/api/magnet/{info_hash}?dn={quote(name[:120])}"
+
+
+# ============ /start and search ============
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     db.track_user(user)
 
-    # Deep link from StreamBreaker
-    if context.args and len(context.args) > 0:
+    # Deep link from the website: /start movie_123 or tv_456
+    if context.args:
         payload = context.args[0]
-
-        # Format: movie_12345 or tv_67890
-        if '_' in payload:
-            parts = payload.split('_', 1)
-            media_type = parts[0]  # movie or tv
-            tmdb_id = parts[1]
-
-            await update.message.reply_text(
-                "🔍 Looking up your selection..."
-            )
-
-            # 1. Check local DB by TMDB ID
-            results = db.search_by_tmdb_id(int(tmdb_id))
-
-            if results:
-                await send_results(update, context, results)
-                return
-
-            # 2. Lookup on TMDB to get title
-            tmdb_data = await lookup_tmdb(media_type, tmdb_id)
-
-            if tmdb_data:
-                title = tmdb_data.get('title') or tmdb_data.get('name', 'Unknown')
-                year = (tmdb_data.get('release_date') or tmdb_data.get('first_air_date', ''))[:4]
-                overview = tmdb_data.get('overview', '')
-                rating = tmdb_data.get('vote_average', 0)
-                poster = tmdb_data.get('poster_path', '')
-
-                # 3. Search local DB by title
-                results = db.search_media(title)
-                if results:
-                    await send_results(update, context, results)
-                    return
-
-                # 4. Not in library → try YTS for direct download links (movies only)
-                yts_links = []
-                if media_type == 'movie':
-                    await update.message.reply_text("🔍 Searching for direct download links...")
-                    yts_links = await find_yts_links(title, year)
-
-                poster_url = f"https://image.tmdb.org/t/p/w500{poster}" if poster else None
-                rating_stars = "⭐" * int(round(rating / 2)) if rating else ""
-                req_type = 'movie' if media_type == 'movie' else 'series'
-
-                if yts_links:
-                    # Build quality buttons — each button opens the magnet link directly
-                    keyboard = []
-                    for link in yts_links:
-                        seeds_label = f" 🌱{link['seeds']}" if link['seeds'] else ""
-                        keyboard.append([
-                            InlineKeyboardButton(
-                                f"⬇️ {link['quality']}  •  {link['size']}{seeds_label}",
-                                url=link['magnet']
-                            )
-                        ])
-                    # Keep the "add to library" option underneath
-                    keyboard.append([
-                        InlineKeyboardButton(
-                            "📥 Request to Library",
-                            callback_data=f"request|{req_type}|{tmdb_id}|{title}|{year}"
-                        )
-                    ])
-
-                    caption = (
-                        f"🎬 **{title}** ({year})\n"
-                        f"{rating_stars} {rating:.1f}/10\n\n"
-                        f"{overview[:250]}{'...' if len(overview) > 250 else ''}\n\n"
-                        f"📦 **Direct download links found!**\n"
-                        f"Pick your quality below 👇"
-                    )
-                else:
-                    # No YTS results — fallback to request-only
-                    keyboard = [[
-                        InlineKeyboardButton(
-                            f"📥 Request {req_type.title()}",
-                            callback_data=f"request|{req_type}|{tmdb_id}|{title}|{year}"
-                        )
-                    ]]
-                    caption = (
-                        f"🎬 **{title}** ({year})\n"
-                        f"{rating_stars} {rating}/10\n\n"
-                        f"{overview[:300]}{'...' if len(overview) > 300 else ''}\n\n"
-                        f"❌ **Not in our library yet!**\n"
-                        f"Click below to request it."
-                    )
-
-                if poster_url:
-                    await update.message.reply_photo(
-                        photo=poster_url,
-                        caption=caption,
-                        parse_mode='Markdown',
-                        reply_markup=InlineKeyboardMarkup(keyboard)
-                    )
-                else:
-                    await update.message.reply_text(
-                        caption,
-                        parse_mode='Markdown',
-                        reply_markup=InlineKeyboardMarkup(keyboard)
-                    )
-                return
-            else:
-                await update.message.reply_text(
-                    "❌ Could not find that content. Try searching by name!"
-                )
-                return
-
-        # Legacy format: movie name with underscores
-        else:
-            query = payload.replace('_', ' ')
-            await update.message.reply_text(f"🔍 Searching for: **{query}**", parse_mode='Markdown')
-            update.message.text = query
-            await handle_message(update, context)
+        media_type, _, tmdb_id = payload.partition("_")
+        if media_type in ("movie", "tv") and tmdb_id.isdigit():
+            await show_title(update.effective_chat.id, context, media_type, int(tmdb_id))
             return
-
-    # Normal /start - Welcome message
-    stats = db.get_stats()
-    await update.message.reply_text(
-        f"👋 Welcome to **StreamBreaker Bot**, {user.first_name}!\n\n"
-        f"📚 Our Library:\n"
-        f"  🎬 {stats['movies']} Movies\n"
-        f"  📺 {stats['episodes']} Episodes\n"
-        f"  👥 {stats['users']} Users\n\n"
-        f"Just send me a **movie or series name** to search!\n\n"
-        f"🌐 Or discover content at:\n"
-        f"{os.getenv('SITE_URL', 'https://streambreaker.netlify.app')}",
-        parse_mode='Markdown'
-    )
-
-# ============ SEARCH HANDLER ============
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.message.text
-    if not query:
+        await run_search(update, context, payload.replace("_", " "))
         return
 
-    user = update.effective_user
-    db.track_user(user)
+    buttons = []
+    if SITE_URL:
+        buttons.append([InlineKeyboardButton("🌐 Browse the website", url=SITE_URL)])
+    await update.message.reply_text(
+        f"👋 Hi {esc(user.first_name)}!\n\n"
+        "Send me the name of any <b>movie</b> or <b>series</b> and I'll find download links for it.\n\n"
+        "<i>Examples:</i> <code>Interstellar</code>, <code>Breaking Bad</code>, <code>Kalki 2898 AD</code>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
+    )
 
-    # Search local DB
-    results = db.search_media(query)
 
-    if results:
-        await send_results(update, context, results)
-    else:
-        # Not found - offer to request
-        # Not in local library — try YTS for direct download links
-        await update.message.reply_text(
-            f"❌ '**{query}**' not in our library.\n🔍 Searching YTS for direct links...",
-            parse_mode='Markdown'
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = (update.message.text or "").strip()
+    if not query:
+        return
+    db.track_user(update.effective_user)
+    await run_search(update, context, query)
+
+
+async def run_search(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str):
+    await context.bot.send_chat_action(update.effective_chat.id, ChatAction.TYPING)
+
+    # "game of thrones s1e1" / "dark season 2" -> straight to that episode or season
+    title, season, episode = parse_query(query)
+    if season and title:
+        await run_episode_search(update, context, title, season, episode)
+        return
+
+    data = await tmdb("/search/multi", query=query, include_adult="false") or {}
+    hits = [h for h in data.get("results", []) if h.get("media_type") in ("movie", "tv")][:8]
+
+    if not hits:
+        await update.effective_message.reply_text(
+            f"😕 Nothing found for <b>{esc(query)}</b>.\nCheck the spelling or try the original title.",
+            parse_mode=ParseMode.HTML,
         )
+        return
 
-        yts_links = await find_yts_links(query)
+    keyboard = []
+    for h in hits:
+        title = h.get("title") or h.get("name") or "Untitled"
+        year = year_of(h)
+        label = f"{TYPE_ICON[h['media_type']]} {title}" + (f" ({year})" if year else "")
+        keyboard.append([InlineKeyboardButton(label[:60], callback_data=f"t|{h['media_type']}|{h['id']}")])
 
-        if yts_links:
-            keyboard = []
-            for link in yts_links:
-                seeds_label = f" 🌱{link['seeds']}" if link['seeds'] else ""
-                keyboard.append([
-                    InlineKeyboardButton(
-                        f"⬇️ {link['quality']}  •  {link['size']}{seeds_label}",
-                        url=link['magnet']
-                    )
-                ])
-            keyboard.append([
-                InlineKeyboardButton("🎬 Request Movie", callback_data=f"search_req|movie|{query[:50]}"),
-                InlineKeyboardButton("📺 Request Series", callback_data=f"search_req|series|{query[:50]}")
-            ])
-            await update.message.reply_text(
-                f"📦 **Direct download links for '{query}':**\n"
-                f"Pick your quality below 👇",
-                parse_mode='Markdown',
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
-        else:
-            # YTS also returned nothing — fall back to request buttons
-            keyboard = [[
-                InlineKeyboardButton(
-                    "🎬 Request Movie",
-                    callback_data=f"search_req|movie|{query[:50]}"
-                ),
-                InlineKeyboardButton(
-                    "📺 Request Series",
-                    callback_data=f"search_req|series|{query[:50]}"
-                )
-            ]]
-            await update.message.reply_text(
-                f"❌ No results for '**{query}**' anywhere.\n\n"
-                f"Would you like to request it?",
-                parse_mode='Markdown',
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
+    await update.effective_message.reply_text(
+        f"🔎 Results for <b>{esc(query)}</b> — pick one:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
 
 
-# ============ SEND RESULTS ============
+async def run_episode_search(update: Update, context: ContextTypes.DEFAULT_TYPE, title: str, season: int, episode: int):
+    data = await tmdb("/search/tv", query=title, include_adult="false") or {}
+    hits = data.get("results", [])[:6]
+    tag = f"S{season:02d}" + (f"E{episode:02d}" if episode else "")
+    if not hits:
+        await update.effective_message.reply_text(
+            f"😕 No series called <b>{esc(title)}</b> found. Check the spelling.", parse_mode=ParseMode.HTML)
+        return
 
-async def send_results(update, context, results):
-    for res in results:
-        title, year, type_, link, quality, size = res
-        formatted_size = format_size(size)
+    # Confident match: skip the picker
+    top = hits[0]
+    if (top.get("name") or "").lower() == title.lower() or len(hits) == 1:
+        await send_links(update.effective_chat.id, context, "tv", top["id"], season, episode)
+        return
 
+    keyboard = [[InlineKeyboardButton(
+        f"📺 {h.get('name')}" + (f" ({year_of(h)})" if year_of(h) else "") + f" · {tag}",
+        callback_data=f"l|tv|{h['id']}|{season}|{episode}")] for h in hits]
+    await update.effective_message.reply_text(
+        f"🔎 Which series do you want <b>{tag}</b> of?", parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+# ============ Title page ============
+
+async def show_title(chat_id: int, context: ContextTypes.DEFAULT_TYPE, media_type: str, tmdb_id: int):
+    await context.bot.send_chat_action(chat_id, ChatAction.TYPING)
+    data = await tmdb(f"/{media_type}/{tmdb_id}")
+    if not data:
+        await context.bot.send_message(chat_id, "❌ Couldn't load that title. Try searching by name.")
+        return
+
+    title = data.get("title") or data.get("name") or "Untitled"
+    year = year_of(data)
+    rating = data.get("vote_average") or 0
+    genres = ", ".join(g["name"] for g in data.get("genres", [])[:3])
+    overview = data.get("overview") or ""
+    if len(overview) > 400:
+        overview = overview[:400].rsplit(" ", 1)[0] + "…"
+
+    meta = [f"⭐ {rating:.1f}" if rating else "", genres]
+    if media_type == "movie" and data.get("runtime"):
+        meta.append(f"{data['runtime'] // 60}h {data['runtime'] % 60}m")
+    if media_type == "tv":
+        meta.append(f"{data.get('number_of_seasons', 0)} seasons")
+    caption = (
+        f"{TYPE_ICON[media_type]} <b>{esc(title)}</b>" + (f" ({year})" if year else "") + "\n"
+        + esc(" · ".join(m for m in meta if m)) + "\n\n"
+        + esc(overview)
+    )
+
+    from api_server import einthusan_url
+
+    buttons = []
+    page = site_link(f"/title/{media_type}/{tmdb_id}")
+    if page:
+        buttons.append([InlineKeyboardButton("🌐 Open on website", url=page)])
+    einthusan = einthusan_url(media_type, data)
+    if einthusan:
+        buttons.append([InlineKeyboardButton("▶️ Stream on Einthusan", url=einthusan)])
+    markup = InlineKeyboardMarkup(buttons) if buttons else None
+
+    poster = data.get("poster_path")
+    if poster:
+        await context.bot.send_photo(chat_id, f"https://image.tmdb.org/t/p/w500{poster}",
+                                     caption=caption[:1024], parse_mode=ParseMode.HTML, reply_markup=markup)
+    else:
+        await context.bot.send_message(chat_id, caption, parse_mode=ParseMode.HTML, reply_markup=markup)
+
+    # Already in the Telegram library? Send the file itself (series: per episode, in send_links)
+    if media_type == "movie":
+        await send_library_files(chat_id, context, db.search_by_tmdb_id(tmdb_id))
+
+    if media_type == "movie":
+        await send_links(chat_id, context, "movie", tmdb_id)
+    else:
+        await send_season_picker(chat_id, context, tmdb_id, data)
+
+
+async def send_library_files(chat_id, context, rows, limit: int = 30):
+    """Copy already-uploaded files from the storage channel into the chat."""
+    for row in rows[:limit]:
+        link = row[3] or ""
         try:
-            # Extract channel ID and message ID from link
-            parts = link.split('/')
-            msg_id = int(parts[-1])
-            chat_id_str = parts[-2]
-            from_chat_id = int(f"-100{chat_id_str}")
-
-            await context.bot.copy_message(
-                chat_id=update.effective_chat.id,
-                from_chat_id=from_chat_id,
-                message_id=msg_id
-            )
+            parts = link.rstrip("/").split("/")
+            await context.bot.copy_message(chat_id, from_chat_id=int(f"-100{parts[-2]}"), message_id=int(parts[-1]))
         except Exception as e:
-            logging.error(f"Copy failed: {e}")
-            # Fallback to text
-            msg = (
-                f"🎬 **{title}** ({year})\n"
-                f"💿 Quality: {quality}\n"
-                f"📦 Size: {formatted_size}\n\n"
-                f"Search for it in the bot to get it!"
-            )
-            await update.effective_message.reply_text(
-                msg, parse_mode='Markdown'
-            )
+            logging.warning(f"copy_message failed for {link}: {e}")
 
-# ============ BUTTON HANDLERS ============
+
+async def send_season_picker(chat_id, context, tmdb_id: int, data: dict, message=None):
+    seasons = [s for s in data.get("seasons", []) if s.get("season_number", 0) > 0 and s.get("episode_count")]
+    if not seasons:
+        await context.bot.send_message(chat_id, "No seasons listed for this series yet.")
+        return
+    buttons = [InlineKeyboardButton(f"S{s['season_number']:02d}", callback_data=f"s|{tmdb_id}|{s['season_number']}")
+               for s in seasons]
+    keyboard = [buttons[i:i + 5] for i in range(0, len(buttons), 5)]
+    text = "📺 <b>Choose a season</b>"
+    if message:
+        await message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
+    else:
+        await context.bot.send_message(chat_id, text, parse_mode=ParseMode.HTML,
+                                       reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def show_episode_picker(query, tmdb_id: int, season: int):
+    data = await tmdb(f"/tv/{tmdb_id}/season/{season}") or {}
+    episodes = [e["episode_number"] for e in data.get("episodes", []) if e.get("episode_number")]
+    keyboard = [[InlineKeyboardButton(f"📦 Full season {season}", callback_data=f"l|tv|{tmdb_id}|{season}|0")]]
+    row = []
+    for ep in episodes[:60]:
+        row.append(InlineKeyboardButton(f"E{ep:02d}", callback_data=f"l|tv|{tmdb_id}|{season}|{ep}"))
+        if len(row) == 6:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    keyboard.append([InlineKeyboardButton("« Seasons", callback_data=f"ss|{tmdb_id}")])
+    await query.edit_message_text(
+        f"📺 <b>Season {season}</b> — pick an episode or the full season:",
+        parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+# ============ Links ============
+
+async def find_links(media_type: str, tmdb_id: int, season: int = 0, episode: int = 0):
+    data = await tmdb(f"/{media_type}/{tmdb_id}", append_to_response="external_ids") or {}
+    title = data.get("title") or data.get("name") or ""
+    year = year_of(data)
+    imdb_id = (data.get("external_ids") or {}).get("imdb_id") or ""
+    results = await search_torrents(title, media_type, year=year, imdb_id=imdb_id, season=season,
+                                    episode=episode, language=data.get("original_language") or "") if title else []
+    label = title + (f" ({year})" if media_type == "movie" and year else "")
+    if season:
+        label += f" S{season:02d}" + (f"E{episode:02d}" if episode else "")
+    return label, results
+
+
+def max_size(season: int, episode: int) -> int:
+    """Upper size limit for the short list: movie 25 GB, episode 10 GB, season pack 80 GB."""
+    gb = 1024 ** 3
+    return 10 * gb if episode else 80 * gb if season else 25 * gb
+
+
+def short_quality(r) -> str:
+    return r.quality if r.quality != "Unknown" else (r.rip or "Other")
+
+
+def describe(r) -> str:
+    bits = [r.quality if r.quality != "Unknown" else "", "/".join(r.languages), r.rip, r.codec, r.size]
+    return " · ".join(b for b in bits if b and b != "Unknown")
+
+
+async def send_links(chat_id, context, media_type: str, tmdb_id: int, season: int = 0, episode: int = 0,
+                     message=None):
+    """Send (or edit `message` into) the best links for a title."""
+    if message:
+        await message.edit_text("🔎 Searching for links…")
+    else:
+        message = await context.bot.send_message(chat_id, "🔎 Searching for links…")
+
+    label, results = await find_links(media_type, tmdb_id, season, episode)
+    best = pick_best(results, 5, max_size(season, episode))
+    ref = f"{media_type}|{tmdb_id}|{season}|{episode}"
+    back = [InlineKeyboardButton("« Episodes", callback_data=f"s|{tmdb_id}|{season}")] if season else []
+    request_btn = InlineKeyboardButton("📥 Send me the file here", callback_data=f"r|{ref}")
+
+    if media_type == "tv" and season:
+        await send_library_files(chat_id, context, db.search_by_tmdb_id(tmdb_id, season, episode))
+
+    if not best:
+        keyboard = [[request_btn]]
+        if back:
+            keyboard.append(back)
+        await message.edit_text(
+            f"😕 No download links found for <b>{esc(label)}</b> right now.\n"
+            "Tap <b>Send me the file here</b> and we'll try to get it for you.",
+            parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    lines = [f"⬇️ <b>{esc(label)}</b>\n"]
+    keyboard = []
+    for i, r in enumerate(best, 1):
+        lines.append(f"<b>{i}.</b> {esc(describe(r))} · 🌱 {r.seeders}\n<i>{esc(r.title[:90])}</i>")
+        keyboard.append([InlineKeyboardButton(f"{i}. {short_quality(r)} · {r.size} · 🌱{r.seeders}"[:60],
+                                              url=magnet_page(r.info_hash, r.title))])
+    if any(r.is_cam for r in best):
+        lines.append("\n⚠️ <i>CAM = recorded in a cinema; picture and sound are poor.</i>")
+    lines.append("\nTap a link to open it in your torrent app.")
+
+    extra = [InlineKeyboardButton("📋 Copy magnets", callback_data=f"m|{ref}")]
+    page = site_link(f"/title/{media_type}/{tmdb_id}")
+    if page and len(results) > len(best):
+        extra.append(InlineKeyboardButton(f"➕ All {len(results)} links", url=page))
+    keyboard.append(extra)
+    keyboard.append([request_btn])
+    if back:
+        keyboard.append(back)
+
+    await message.edit_text("\n".join(lines), parse_mode=ParseMode.HTML,
+                            reply_markup=InlineKeyboardMarkup(keyboard), disable_web_page_preview=True)
+
+
+async def send_magnet_text(chat_id, context, media_type, tmdb_id, season, episode):
+    label, results = await find_links(media_type, tmdb_id, season, episode)
+    best = pick_best(results, 5, max_size(season, episode))
+    if not best:
+        await context.bot.send_message(chat_id, "No links to copy.")
+        return
+    parts = [f"📋 <b>{esc(label)}</b> — tap a link to copy it:\n"]
+    for i, r in enumerate(best, 1):
+        parts.append(f"<b>{i}. {esc(short_quality(r))} · {esc(r.size)}</b>\n<code>{esc(short_magnet(r.info_hash, r.title))}</code>")
+    await context.bot.send_message(chat_id, "\n\n".join(parts), parse_mode=ParseMode.HTML)
+
+
+# ============ Buttons ============
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    chat_id = query.message.chat_id
+    parts = (query.data or "").split("|")
+    action = parts[0]
 
-    data = query.data.split('|')
-    action = data[0]
+    try:
+        if action == "t":                      # picked a search result
+            await query.answer()
+            await show_title(chat_id, context, parts[1], int(parts[2]))
 
-    # Direct request from StreamBreaker deep link
-    if action == "request":
-        req_type = data[1]      # movie or series
-        tmdb_id = data[2]
-        title = data[3]
-        year = data[4]
-        user = query.from_user
+        elif action == "s":                    # picked a season
+            await query.answer()
+            await show_episode_picker(query, int(parts[1]), int(parts[2]))
 
-        success = db.add_request(
-            user_id=user.id,
-            title=title,
-            year=year,
-            media_type=req_type,
-            tmdb_id=int(tmdb_id),
-            username=user.username
-        )
+        elif action == "ss":                   # back to seasons
+            await query.answer()
+            data = await tmdb(f"/tv/{parts[1]}") or {}
+            await send_season_picker(chat_id, context, int(parts[1]), data, message=query.message)
 
-        if success:
-            await query.edit_message_caption(
-                caption=(
-                    f"✅ **{title}** ({year}) has been requested!\n\n"
-                    f"📥 Status: **Queued for download**\n"
-                    f"⏳ You'll be notified when it's ready.\n\n"
-                    f"_Your request has been sent to the admin._"
-                ),
-                parse_mode='Markdown'
-            )
+        elif action == "l":                    # links for movie / season / episode
+            await query.answer("Searching…")
+            await send_links(chat_id, context, parts[1], int(parts[2]), int(parts[3]), int(parts[4]),
+                             message=query.message)
 
-            # Notify admin
-            try:
-                await context.bot.send_message(
-                    chat_id=ADMIN_ID,
-                    text=(
-                        f"📥 **New Request!**\n\n"
-                        f"👤 User: @{user.username or user.first_name} ({user.id})\n"
-                        f"🎬 Title: **{title}** ({year})\n"
-                        f"📂 Type: {req_type}\n"
-                        f"🔗 TMDB: https://www.themoviedb.org/{req_type}/{tmdb_id}"
-                    ),
-                    parse_mode='Markdown'
-                )
-            except Exception as e:
-                logging.error(f"Admin notify failed: {e}")
+        elif action == "m":                    # copy magnets as text
+            await query.answer()
+            await send_magnet_text(chat_id, context, parts[1], int(parts[2]), int(parts[3]), int(parts[4]))
+
+        elif action == "r":                    # request to library
+            await handle_request(query, context, parts[1], int(parts[2]), int(parts[3]), int(parts[4]))
+
         else:
-            await query.edit_message_caption(
-                caption=(
-                    f"⚠️ **{title}** was already requested!\n\n"
-                    f"⏳ It's in the queue. Please wait."
-                ),
-                parse_mode='Markdown'
+            await query.answer("This button has expired — send the name again.", show_alert=True)
+    except Exception as e:
+        logging.exception(f"Button {query.data} failed: {e}")
+        try:
+            await query.answer("Something went wrong, please try again.", show_alert=True)
+        except Exception:
+            pass
+
+
+async def handle_request(query, context, media_type, tmdb_id, season, episode):
+    user = query.from_user
+    data = await tmdb(f"/{media_type}/{tmdb_id}") or {}
+    title = data.get("title") or data.get("name") or "Unknown"
+    label = title + (f" S{season:02d}" + (f"E{episode:02d}" if episode else "") if season else "")
+    year = year_of(data)
+    added = db.add_request(user_id=user.id, title=title, year=year,
+                           media_type="movie" if media_type == "movie" else "series",
+                           tmdb_id=tmdb_id, username=user.username, season=season, episode=episode)
+    await query.answer(
+        "✅ Requested! We'll send the file in this chat when it's ready (usually 15–60 min)."
+        if added else "Already requested — it's in the queue.", show_alert=True)
+    title = label
+    if added and ADMIN_ID:
+        try:
+            await context.bot.send_message(
+                ADMIN_ID,
+                f"📥 <b>New request</b>\n👤 @{esc(user.username or user.first_name)} ({user.id})\n"
+                f"{TYPE_ICON.get(media_type, '')} <b>{esc(title)}</b> ({esc(year)})\n"
+                f"https://www.themoviedb.org/{media_type}/{tmdb_id}",
+                parse_mode=ParseMode.HTML, disable_web_page_preview=True,
             )
+        except Exception as e:
+            logging.error(f"Admin notify failed: {e}")
 
-    # Search-based request (user typed name, not found)
-    elif action == "search_req":
-        req_type = data[1]
-        search_term = data[2]
-        user = query.from_user
 
-        await query.edit_message_text(
-            f"🔍 Searching TMDB for '{search_term}'..."
-        )
-
-        # Search TMDB
-        async with aiohttp.ClientSession() as session:
-            endpoint = 'movie' if req_type == 'movie' else 'tv'
-            async with session.get(
-                f"https://api.themoviedb.org/3/search/{endpoint}",
-                params={"api_key": TMDB_KEY, "query": search_term}
-            ) as resp:
-                tmdb_data = await resp.json()
-
-        results = tmdb_data.get('results', [])
-        if not results:
-            await query.edit_message_text(
-                f"❌ No results found on TMDB for '{search_term}'.\n"
-                f"Try a different spelling!"
-            )
-            return
-
-        # Show top 5 results
-        keyboard = []
-        for item in results[:5]:
-            title = item.get('title') or item.get('name', 'Unknown')
-            year = (item.get('release_date') or item.get('first_air_date', ''))[:4]
-            tmdb_id = item.get('id')
-            display = f"{title} ({year})" if year else title
-            keyboard.append([
-                InlineKeyboardButton(
-                    display,
-                    callback_data=f"confirm_req|{req_type}|{tmdb_id}|{title[:30]}|{year}"
-                )
-            ])
-
-        await query.edit_message_text(
-            f"Select the correct {req_type}:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
-    # Confirm request after selection
-    elif action == "confirm_req":
-        req_type = data[1]
-        tmdb_id = data[2]
-        title = data[3]
-        year = data[4]
-        user = query.from_user
-
-        success = db.add_request(
-            user_id=user.id,
-            title=title,
-            year=year,
-            media_type=req_type,
-            tmdb_id=int(tmdb_id),
-            username=user.username
-        )
-
-        if success:
-            await query.edit_message_text(
-                f"✅ **{title}** ({year}) has been requested!\n\n"
-                f"📥 Status: Queued for download\n"
-                f"⏳ You'll be notified when it's ready.",
-                parse_mode='Markdown'
-            )
-
-            # Notify admin
-            try:
-                await context.bot.send_message(
-                    chat_id=ADMIN_ID,
-                    text=(
-                        f"📥 **New Request!**\n\n"
-                        f"👤 @{user.username or user.first_name} ({user.id})\n"
-                        f"🎬 **{title}** ({year})\n"
-                        f"📂 Type: {req_type}\n"
-                        f"🔗 TMDB: https://www.themoviedb.org/{req_type}/{tmdb_id}"
-                    ),
-                    parse_mode='Markdown'
-                )
-            except Exception as e:
-                logging.error(f"Admin notify failed: {e}")
-        else:
-            await query.edit_message_text(
-                f"⚠️ **{title}** was already requested!\n"
-                f"⏳ It's in the queue.",
-                parse_mode='Markdown'
-            )
-
-# ============ ADMIN COMMANDS ============
+# ============ Admin & extras ============
 
 async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ Admin only.")
         return
-
-    stats = db.get_stats()
+    s = db.get_stats()
     await update.message.reply_text(
-        f"📊 **StreamBreaker Stats**\n\n"
-        f"🎬 Movies: {stats['movies']}\n"
-        f"📺 Episodes: {stats['episodes']}\n"
-        f"📚 Total Media: {stats['total_media']}\n"
-        f"👥 Users: {stats['users']}\n"
-        f"📥 Pending Requests: {stats['pending_requests']}",
-        parse_mode='Markdown'
+        f"📊 <b>StreamBreaker</b>\n👥 Users: {s['users']}\n📥 Pending requests: {s['pending_requests']}\n"
+        f"🎬 Library movies: {s['movies']}\n📺 Library episodes: {s['episodes']}",
+        parse_mode=ParseMode.HTML,
     )
+
 
 async def admin_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ Admin only.")
         return
-
     pending = db.get_pending_requests()
     if not pending:
-        await update.message.reply_text("✅ No pending requests!")
+        await update.message.reply_text("✅ No pending requests.")
         return
+    lines = ["📥 <b>Pending requests</b>\n"]
+    for _id, user_id, username, title, year, media_type, tmdb_id, requested_at, season, episode, status in pending[:25]:
+        tag = f" S{season:02d}" + (f"E{episode:02d}" if episode else "") if season else ""
+        lines.append(f"• <b>{esc(title)}</b>{tag} ({esc(year)}) — {esc(status)} — @{esc(username or user_id)}")
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
-    msg = "📥 **Pending Requests:**\n\n"
-    for req in pending[:20]:
-        req_id, user_id, username, title, year, media_type, tmdb_id, requested_at = req
-        msg += (
-            f"**{title}** ({year}) - {media_type}\n"
-            f"  👤 @{username or user_id}\n"
-            f"  📅 {requested_at[:16]}\n\n"
-        )
 
-    await update.message.reply_text(msg, parse_mode='Markdown')
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = ("Send me a movie or series name to get download links.\n\n"
+            "/recommend &lt;what you like&gt; — AI suggestions")
+    if update.effective_user.id == ADMIN_ID:
+        text += "\n\n<b>Admin</b>\n/stats — numbers\n/requests — pending requests"
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
-async def admin_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-
-    await update.message.reply_text(
-        "🔧 **Admin Commands:**\n\n"
-        "/stats - Bot statistics\n"
-        "/requests - Pending download requests\n"
-        "/help - This message",
-        parse_mode='Markdown'
-    )
 
 async def recommend(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = ' '.join(context.args) if context.args else None
-
-    if not query:
+    ask = " ".join(context.args) if context.args else ""
+    if not ask:
         await update.message.reply_text(
-            "🎬 **AI Movie Recommender**\n\n"
-            "Tell me what you like!\n\n"
-            "Examples:\n"
-            "/recommend movies like Inception\n"
-            "/recommend feel-good comedy for date night\n"
-            "/recommend best Indian thriller series",
-            parse_mode='Markdown'
+            "🤖 Tell me what you like, e.g.\n<code>/recommend movies like Inception</code>\n"
+            "<code>/recommend feel-good Malayalam comedy</code>",
+            parse_mode=ParseMode.HTML,
         )
         return
+    await context.bot.send_chat_action(update.effective_chat.id, ChatAction.TYPING)
+    prompt = (f"The user wants movie/series recommendations: '{ask}'.\n"
+              "Suggest exactly 5 titles. For each: Title (Year) — one short reason. Plain text, no markdown.")
+    try:
+        from api_server import ask_ai  # reuse the API's provider/key rotation
 
-    await update.message.reply_text("🤖 Thinking...")
+        class _Req:
+            async def json(self):
+                return {"prompt": prompt}
 
-    prompt = (
-        f"The user wants movie/series recommendations: '{query}'\n\n"
-        f"Suggest exactly 5 titles. For each, give:\n"
-        f"- Title (Year)\n"
-        f"- One-line reason why they'd love it\n"
-        f"- A mood emoji\n\n"
-        f"Be concise and fun."
+        text = (await ask_ai(_Req())).get("response", "")
+    except Exception as e:
+        logging.error(f"recommend failed: {e}")
+        text = ""
+    await update.message.reply_text(
+        (esc(text) or "AI is busy, try again later.") + "\n\n<i>Send any title's name to get links.</i>",
+        parse_mode=ParseMode.HTML,
     )
 
-    gemini_key = os.getenv("GEMINI_API_KEY")
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={gemini_key}"
 
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json={
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"maxOutputTokens": 500, "temperature": 0.9}
-            }) as resp:
-                data = await resp.json()
-                text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "No response")
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logging.error("Unhandled bot error", exc_info=context.error)
 
-        await update.message.reply_text(
-            f"🎬 **AI Recommendations:**\n\n{text}",
-            parse_mode='Markdown'
-        )
-    except Exception as e:
-        await update.message.reply_text("❌ Gemini AI is busy. Try again!")
 
-# ============ MAIN ============
+# ============ Wiring ============
 
-application = ApplicationBuilder().token(BOT_TOKEN).build()
+def build_application():
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_cmd))
+    application.add_handler(CommandHandler("recommend", recommend))
+    application.add_handler(CommandHandler("stats", admin_stats))
+    application.add_handler(CommandHandler("requests", admin_requests))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_handler(CallbackQueryHandler(button_handler))
+    application.add_error_handler(on_error)
+    return application
 
-application.add_handler(CommandHandler('start', start))
-application.add_handler(CommandHandler('recommend', recommend))
-application.add_handler(CommandHandler('stats', admin_stats))
-application.add_handler(CommandHandler('requests', admin_requests))
-application.add_handler(CommandHandler('help', admin_help))
 
-application.add_handler(MessageHandler(
-    filters.TEXT & (~filters.COMMAND),
-    handle_message
-))
+application = build_application() if BOT_TOKEN else None
 
-application.add_handler(CallbackQueryHandler(button_handler))
-
-if __name__ == '__main__':
-    print("✅ StreamBreaker Bot is running!")
+if __name__ == "__main__":
+    print("✅ StreamBreaker bot is running")
     application.run_polling(drop_pending_updates=True)

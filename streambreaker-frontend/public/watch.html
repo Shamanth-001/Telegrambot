@@ -1,173 +1,253 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>StreamBreaker Player</title>
-    <style>
-        *{margin:0;padding:0;box-sizing:border-box}
-        body,html{width:100%;height:100%;background:#000;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;color:#f8fafc;overflow:hidden;display:flex;flex-direction:column}
-        .top-bar{display:flex;align-items:center;justify-content:space-between;padding:0.35rem 0.8rem;background:rgba(0,0,0,0.85);backdrop-filter:blur(20px);border-bottom:1px solid rgba(255,255,255,0.04);z-index:100;flex-shrink:0;transition:transform 0.3s ease,opacity 0.3s ease}
-        .top-bar.hidden{transform:translateY(-100%);opacity:0;pointer-events:none}
-        .back-btn{display:flex;align-items:center;gap:0.3rem;padding:0.3rem 0.6rem;border-radius:0.4rem;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.08);color:#94a3b8;font-size:0.7rem;font-weight:600;cursor:pointer;transition:all 0.2s;text-decoration:none}
-        .back-btn:hover{background:rgba(255,255,255,0.12);color:#fff}
-        .brand-link{text-decoration:none}
-        .brand-text{font-size:0.8rem;font-weight:700;background:linear-gradient(135deg,#f59e0b,#ef4444);-webkit-background-clip:text;-webkit-text-fill-color:transparent;cursor:pointer}
-        .server-controls{display:flex;align-items:center;gap:0.3rem}
-        .server-badge{font-size:0.58rem;padding:0.18rem 0.45rem;border-radius:2rem;background:rgba(34,197,94,0.15);color:#4ade80;border:1px solid rgba(34,197,94,0.2);font-weight:600;display:flex;align-items:center;gap:0.2rem}
-        .dot{width:4px;height:4px;border-radius:50%;background:#4ade80;animation:pulse 2s infinite}
-        @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}
-        .switch-btn{padding:0.28rem 0.5rem;border-radius:0.4rem;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.08);color:#e2e8f0;font-size:0.63rem;font-weight:600;cursor:pointer;transition:all 0.2s}
-        .switch-btn:hover{background:rgba(245,158,11,0.15);color:#f59e0b;border-color:rgba(245,158,11,0.3)}
-        .fs-btn{padding:0.28rem 0.5rem;border-radius:0.4rem;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.08);color:#e2e8f0;font-size:0.63rem;font-weight:600;cursor:pointer;transition:all 0.2s}
-        .fs-btn:hover{background:rgba(59,130,246,0.15);color:#60a5fa;border-color:rgba(59,130,246,0.3)}
-        .player-wrapper{flex:1;position:relative;background:#000;overflow:hidden}
-        .player-wrapper iframe{width:100%;height:100%;border:none;display:block}
-        .loading-overlay{position:absolute;inset:0;background:#000;display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:50;transition:opacity 0.5s}
-        .loading-overlay.done{opacity:0;pointer-events:none}
-        .spinner{width:36px;height:36px;border:3px solid rgba(245,158,11,0.2);border-top-color:#f59e0b;border-radius:50%;animation:spin 0.8s linear infinite;margin-bottom:0.8rem}
-        @keyframes spin{to{transform:rotate(360deg)}}
-        .load-text{font-size:0.8rem;color:#94a3b8;font-weight:500}
-        .load-sub{font-size:0.68rem;color:#475569;margin-top:0.25rem}
-        .server-modal{display:none;position:fixed;inset:0;z-index:200;background:rgba(0,0,0,0.85);backdrop-filter:blur(8px);align-items:center;justify-content:center}
-        .server-modal.open{display:flex}
-        .server-list{background:rgba(15,15,25,0.98);border:1px solid rgba(255,255,255,0.08);border-radius:1rem;padding:1.2rem;width:88%;max-width:300px;box-shadow:0 25px 60px rgba(0,0,0,0.6)}
-        .server-list h3{font-size:0.85rem;font-weight:700;margin-bottom:0.8rem;color:#e2e8f0}
-        .srv-opt{display:flex;align-items:center;justify-content:space-between;padding:0.55rem 0.7rem;border-radius:0.5rem;margin-bottom:0.25rem;cursor:pointer;transition:all 0.2s;border:1px solid transparent}
-        .srv-opt:hover{background:rgba(245,158,11,0.08);border-color:rgba(245,158,11,0.2)}
-        .srv-opt.active{background:rgba(245,158,11,0.12);border-color:rgba(245,158,11,0.3)}
-        .srv-name{font-size:0.72rem;font-weight:600;color:#e2e8f0}
-        .srv-desc{font-size:0.58rem;color:#64748b;margin-top:0.08rem}
-        .srv-tag{font-size:0.58rem;font-weight:600;padding:0.12rem 0.35rem;border-radius:1rem}
-        .tag-best{background:rgba(34,197,94,0.15);color:#4ade80}
-        .tag-good{background:rgba(59,130,246,0.15);color:#60a5fa}
-        .tag-ok{background:rgba(250,204,21,0.15);color:#facc15}
-        .close-modal{margin-top:0.5rem;width:100%;padding:0.5rem;border-radius:0.5rem;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);color:#94a3b8;font-size:0.72rem;font-weight:600;cursor:pointer;transition:all 0.2s}
-        .close-modal:hover{background:rgba(255,255,255,0.1);color:#fff}
-        .error-banner{display:none;position:absolute;bottom:0.8rem;left:50%;transform:translateX(-50%);background:rgba(239,68,68,0.15);border:1px solid rgba(239,68,68,0.3);border-radius:0.5rem;padding:0.4rem 0.8rem;color:#fca5a5;font-size:0.65rem;font-weight:500;z-index:60;text-align:center;max-width:90%}
-        .error-banner.show{display:block}
-        /* Show/hide hint */
-        .bar-hint{position:absolute;top:0;left:50%;transform:translateX(-50%);padding:0.15rem 0.6rem;background:rgba(0,0,0,0.7);border-radius:0 0 0.4rem 0.4rem;color:#64748b;font-size:0.55rem;z-index:99;cursor:pointer;opacity:0;transition:opacity 0.3s}
-        .top-bar.hidden ~ .player-wrapper .bar-hint{opacity:1}
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#000000">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<title>Watch · StreamBreaker</title>
+<style>
+:root{--bg:#000;--surface:#141418;--surface2:#1c1c22;--line:#27272e;--ink:#f4f4f5;--muted:#a1a1aa;--dim:#71717a;--accent:#c8f542;--accent-ink:#0b0b0d}
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{height:100%;background:var(--bg);color:var(--ink);font:14px/1.4 Inter,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;overflow:hidden}
+body{display:flex;flex-direction:column}
+button,a{font:inherit;color:inherit}
+.bar{display:flex;align-items:center;gap:10px;padding:8px 12px;background:rgba(11,11,13,.92);border-bottom:1px solid var(--line);flex-shrink:0;transition:transform .25s,opacity .25s;z-index:10}
+.bar.hide{transform:translateY(-100%);opacity:0;pointer-events:none;position:absolute;left:0;right:0}
+.btn{display:inline-flex;align-items:center;gap:6px;padding:7px 12px;border-radius:999px;background:var(--surface2);border:1px solid var(--line);font-weight:600;font-size:13px;cursor:pointer;text-decoration:none;white-space:nowrap}
+.btn:hover{border-color:var(--ink)}
+.btn.accent{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.btn:disabled{opacity:.4;cursor:default;border-color:var(--line)}
+.title{flex:1;min-width:0;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.title small{color:var(--dim);font-weight:500;margin-left:6px}
+.ep{display:flex;gap:6px}
+.stage{flex:1;position:relative;background:#000}
+iframe{position:absolute;inset:0;width:100%;height:100%;border:0}
+.overlay{pointer-events:none;position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;background:#000;transition:opacity .4s;z-index:2}
+.overlay.done{opacity:0;pointer-events:none}
+.spin{width:34px;height:34px;border:3px solid rgba(200,245,66,.2);border-top-color:var(--accent);border-radius:50%;animation:s .8s linear infinite}
+@keyframes s{to{transform:rotate(360deg)}}
+.hint{color:var(--muted);font-size:13px}
+.toast{position:absolute;left:50%;bottom:16px;transform:translateX(-50%);background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:10px 14px;font-size:13px;color:var(--muted);display:none;gap:10px;align-items:center;z-index:3;max-width:calc(100% - 32px)}
+.toast.show{display:flex}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.8);display:none;align-items:center;justify-content:center;z-index:20;padding:16px}
+.modal.open{display:flex}
+.sheet{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:16px;width:100%;max-width:340px}
+.sheet h3{font-size:15px;margin-bottom:10px}
+.opt{display:flex;justify-content:space-between;align-items:center;width:100%;padding:10px 12px;border-radius:10px;background:none;border:1px solid transparent;cursor:pointer;text-align:left}
+.opt:hover{background:var(--surface2)}
+.opt.on{border-color:var(--accent);background:rgba(200,245,66,.08)}
+.opt span{font-size:12px;color:var(--dim)}
+.opt i{font-style:normal;font-size:11px;font-weight:700;padding:2px 7px;border-radius:99px;margin-left:8px}
+.safe{background:rgba(200,245,66,.15);color:var(--accent)}
+.ads{background:rgba(251,191,36,.15);color:#fbbf24}
+.badge{font-size:11px;font-weight:700;padding:3px 8px;border-radius:99px}
+.show-bar{position:absolute;top:0;left:50%;transform:translateX(-50%);z-index:4;padding:4px 12px;border-radius:0 0 10px 10px;background:rgba(11,11,13,.8);font-size:12px;color:var(--muted);cursor:pointer;display:none;border:0}
+.bar.hide ~ .stage .show-bar{display:block}
+@media (max-width:640px){.hide-sm{display:none}}
+</style>
 </head>
 <body>
-    <div class="top-bar" id="topbar">
-        <a class="back-btn" href="/">&#8592; Home</a>
-        <a class="brand-link" href="/"><span class="brand-text">StreamBreaker</span></a>
-        <div class="server-controls">
-            <div class="server-badge" id="badge"><span class="dot"></span><span id="badge-text">Server 1</span></div>
-            <button class="switch-btn" onclick="openModal()">Switch</button>
-            <button class="fs-btn" onclick="toggleBar()" title="Toggle bar">⛶</button>
-        </div>
-    </div>
-    <div class="player-wrapper" id="pw">
-        <div class="bar-hint" onclick="toggleBar()">▼ Show bar</div>
-        <div class="loading-overlay" id="loader">
-            <div class="spinner"></div>
-            <div class="load-text">Loading player...</div>
-            <div class="load-sub" id="loadsub">Finding best server</div>
-        </div>
-        <div class="error-banner" id="errBanner">Server not responding. Try switching servers.</div>
-        <iframe id="player" allowfullscreen allow="autoplay; fullscreen; picture-in-picture; encrypted-media" referrerpolicy="no-referrer-when-downgrade"></iframe>
-    </div>
-    <div class="server-modal" id="modal">
-        <div class="server-list">
-            <h3>🖥️ Switch Server</h3>
-            <div id="srv-opts"></div>
-            <button class="close-modal" onclick="closeModal()">Cancel</button>
-        </div>
-    </div>
+<div class="bar" id="bar">
+  <a class="btn" id="back" href="/">← Back</a>
+  <div class="title" id="title">StreamBreaker</div>
+  <div class="ep" id="epNav" hidden>
+    <button class="btn" id="prev" type="button">‹ <span class="hide-sm">Prev</span></button>
+    <button class="btn" id="next" type="button"><span class="hide-sm">Next</span> ›</button>
+  </div>
+  <button class="btn" id="srvBtn" type="button">Server: <b id="srvName"></b> <span class="badge" id="srvBadge"></span></button>
+  <button class="btn hide-sm" id="hideBtn" type="button" title="Hide bar (F)">⤢</button>
+</div>
+<div class="stage">
+  <button class="show-bar" id="showBar" type="button">▾ Show controls</button>
+  <div class="overlay" id="overlay"><div class="spin"></div><div class="hint" id="status">Loading player…</div></div>
+  <div class="toast" id="toast"><span id="toastText">Not loading?</span> <button class="btn accent" id="tryNext" type="button">Try next server</button></div>
+</div>
+<div class="modal" id="modal">
+  <div class="sheet">
+    <h3>Choose a server</h3>
+    <div id="opts"></div>
+    <button class="btn" style="width:100%;justify-content:center;margin-top:8px" id="closeModal" type="button">Close</button>
+  </div>
+</div>
 <script>
-const P=new URLSearchParams(location.search);
-const id=P.get('id'), type=P.get('type')||'movie', ttl=decodeURIComponent(P.get('title')||'');
-document.title=(ttl||'Watch')+' — StreamBreaker';
+(function () {
+  var P = new URLSearchParams(location.search);
+  var id = P.get('id');
+  var type = P.get('type') === 'tv' ? 'tv' : 'movie';
+  var name = P.get('title') || '';
+  var s = Math.max(1, parseInt(P.get('s') || '1', 10) || 1);
+  var e = Math.max(1, parseInt(P.get('e') || '1', 10) || 1);
 
-const S=[
-  {n:'VidSrc.to',d:'Fast & reliable',u:`https://vidsrc.to/embed/${type}/${id}`,t:'best',l:'Best'},
-  {n:'VidSrc.me',d:'VidSrc mirror',u:`https://vidsrc.me/embed/${type}/?tmdb=${id}`,t:'best',l:'Best'},
-  {n:'2Embed',d:'Multiple sources',u:`https://www.2embed.cc/embed/${id}`,t:'good',l:'Good'},
-  {n:'AutoEmbed',d:'Wide compatibility',u:`https://autoembed.co/${type}/tmdb/${id}`,t:'good',l:'Good'},
-  {n:'SuperEmbed',d:'Fallback option',u:`https://multiembed.mov/?video_id=${id}&tmdb=1`,t:'ok',l:'OK'}
-];
+  // sandbox: true  -> loaded in a sandboxed iframe: the player cannot redirect this page or open
+  //                   ad tabs. Only some providers allow this (tested: VidZee, VidSrc PM).
+  // sandbox: false -> providers that refuse to play when sandboxed; they may open ad tabs.
+  var SERVERS = [
+    { n: 'VidZee', d: 'Blocks pop-ups and redirects', sandbox: true,
+      u: function () { return type === 'tv' ? 'https://player.vidzee.wtf/embed/tv/' + id + '/' + s + '/' + e : 'https://player.vidzee.wtf/embed/movie/' + id; } },
+    { n: 'VidSrc PM', d: 'Blocks pop-ups and redirects', sandbox: true,
+      u: function () { return type === 'tv' ? 'https://vidsrc.pm/embed/tv/' + id + '/' + s + '/' + e : 'https://vidsrc.pm/embed/movie/' + id; } },
+    { n: 'VidSrc', d: 'Large library', sandbox: false,
+      u: function () { return type === 'tv' ? 'https://vidsrc.to/embed/tv/' + id + '/' + s + '/' + e : 'https://vidsrc.to/embed/movie/' + id; } },
+    { n: 'VidLink', d: 'Fast HD', sandbox: false,
+      u: function () { return type === 'tv' ? 'https://vidlink.pro/tv/' + id + '/' + s + '/' + e : 'https://vidlink.pro/movie/' + id; } },
+    { n: 'Videasy', d: 'Multiple qualities', sandbox: false,
+      u: function () { return type === 'tv' ? 'https://player.videasy.net/tv/' + id + '/' + s + '/' + e : 'https://player.videasy.net/movie/' + id; } },
+    { n: 'VidFast', d: 'Backup', sandbox: false,
+      u: function () { return type === 'tv' ? 'https://vidfast.pro/tv/' + id + '/' + s + '/' + e : 'https://vidfast.pro/movie/' + id; } },
+    { n: '2Embed', d: 'Backup', sandbox: false,
+      u: function () { return type === 'tv' ? 'https://www.2embed.cc/embedtv/' + id + '&s=' + s + '&e=' + e : 'https://www.2embed.cc/embed/' + id; } }
+  ];
+  var SANDBOX = 'allow-scripts allow-same-origin allow-forms allow-presentation';
 
-let ci=0, failTimer=null;
-const pl=document.getElementById('player'),ld=document.getElementById('loader'),eb=document.getElementById('errBanner');
-const topbar=document.getElementById('topbar');
+  var $ = function (x) { return document.getElementById(x); };
+  var stage = document.querySelector('.stage'), overlay = $('overlay'), toast = $('toast'), bar = $('bar');
+  var player = null, current = 0, slowTimer = null, hideTimer = null, leaving = false, loaded = false;
+  try { current = Math.min(SERVERS.length - 1, parseInt(localStorage.getItem('sb.server.v2') || '0', 10) || 0); } catch (x) {}
 
-// Block popups from iframe
-window.open=function(){return null};
+  // While an unsandboxed player is active, ask before anything navigates this page away
+  // (that's how ad redirects hijack the tab). Our own links set `leaving` first.
+  window.addEventListener('beforeunload', function (ev) {
+    if (leaving || !player || SERVERS[current].sandbox) return;
+    ev.preventDefault();
+    ev.returnValue = '';
+  });
+  document.addEventListener('click', function (ev) {
+    if (ev.target.closest && ev.target.closest('a')) leaving = true;
+  }, true);
 
-// Auto-hide bar after 5 seconds
-let hideTimer=null;
-function startHideTimer(){
-    clearTimeout(hideTimer);
-    hideTimer=setTimeout(function(){topbar.classList.add('hidden')},5000);
-}
-function toggleBar(){
-    topbar.classList.toggle('hidden');
-    if(!topbar.classList.contains('hidden')) startHideTimer();
-}
-// Show bar on mouse move near top
-document.addEventListener('mousemove',function(e){
-    if(e.clientY<50 && topbar.classList.contains('hidden')){
-        topbar.classList.remove('hidden');
-        startHideTimer();
+  $('back').href = id ? '/title/' + type + '/' + id : '/';
+  $('back').addEventListener('click', function (ev) {
+    leaving = true;
+    if (document.referrer && new URL(document.referrer).origin === location.origin && history.length > 1) {
+      ev.preventDefault(); history.back();
     }
-});
+  });
 
-function init(){
-    if(!id){document.getElementById('loadsub').textContent='No movie ID';return}
-    document.getElementById('loadsub').textContent='Trying '+S[0].n+'...';
-    loadSrv(0);
-    startHideTimer();
-}
+  function label() {
+    return name + (type === 'tv' ? ' · S' + String(s).padStart(2, '0') + 'E' + String(e).padStart(2, '0') : '');
+  }
 
-function loadSrv(i){
-    ci=i;
-    const s=S[i];
-    eb.classList.remove('show');
-    document.getElementById('loadsub').textContent='Loading '+s.n+'...';
-    ld.classList.remove('done');
-    pl.src=s.u;
-    document.getElementById('badge-text').textContent=s.n;
-    const b=document.getElementById('badge');
-    const c=s.t==='best'?['rgba(34,197,94,0.15)','#4ade80','rgba(34,197,94,0.2)']:s.t==='good'?['rgba(59,130,246,0.15)','#60a5fa','rgba(59,130,246,0.2)']:['rgba(250,204,21,0.15)','#facc15','rgba(250,204,21,0.2)'];
-    b.style.background=c[0];b.style.color=c[1];b.style.borderColor=c[2];
-    b.querySelector('.dot').style.background=c[1];
-    pl.onload=function(){setTimeout(function(){ld.classList.add('done')},600)};
-    if(failTimer) clearTimeout(failTimer);
-    failTimer=setTimeout(function(){
-        ld.classList.add('done');
-        eb.classList.add('show');
-    },8000);
-    renderOpts();
-}
+  function makeFrame(srv) {
+    // A new element each time: the sandbox attribute only applies to fresh frames
+    if (player) player.remove();
+    player = document.createElement('iframe');
+    player.allowFullscreen = true;
+    player.setAttribute('allow', 'autoplay; fullscreen; picture-in-picture; encrypted-media');
+    player.setAttribute('referrerpolicy', 'origin');
+    if (srv.sandbox) player.setAttribute('sandbox', SANDBOX);
+    player.addEventListener('load', function () { loaded = true; setTimeout(function () { overlay.classList.add('done'); }, 500); });
+    player.src = srv.u();
+    stage.appendChild(player);
+  }
 
-function renderOpts(){
-    const c=document.getElementById('srv-opts');c.innerHTML='';
-    S.forEach(function(s,i){
-        const d=document.createElement('div');
-        d.className='srv-opt'+(i===ci?' active':'');
-        d.onclick=function(){loadSrv(i);closeModal()};
-        d.innerHTML='<div><div class="srv-name">'+s.n+(i===ci?' ✓':'')+'</div><div class="srv-desc">'+s.d+'</div></div><span class="srv-tag tag-'+s.t+'">'+s.l+'</span>';
-        c.appendChild(d);
+  function load(i) {
+    current = i;
+    leaving = false;
+    try { localStorage.setItem('sb.server.v2', String(i)); } catch (x) {}
+    var srv = SERVERS[i];
+    $('srvName').textContent = srv.n;
+    $('srvBadge').textContent = srv.sandbox ? 'No pop-ups' : 'May show ads';
+    $('srvBadge').className = 'badge ' + (srv.sandbox ? 'safe' : 'ads');
+    $('title').innerHTML = '';
+    $('title').appendChild(document.createTextNode(name || 'Now playing'));
+    if (type === 'tv') {
+      var sm = document.createElement('small');
+      sm.textContent = 'S' + s + ' · E' + e;
+      $('title').appendChild(sm);
+    }
+    document.title = label() + ' · StreamBreaker';
+    $('status').textContent = 'Loading ' + srv.n + '…';
+    overlay.classList.remove('done');
+    toast.classList.remove('show');
+    loaded = false;
+    makeFrame(srv);
+    clearTimeout(slowTimer);
+    // Never leave the spinner over the player for long, even if the embed never fires "load"
+    setTimeout(function () { overlay.classList.add('done'); }, 5000);
+    slowTimer = setTimeout(function () {
+      $('toastText').textContent = loaded ? 'Not playing? This title may be missing here.' : 'Not loading?';
+      toast.classList.add('show');
+      setTimeout(function () { toast.classList.remove('show'); }, 10000);
+    }, 15000);
+    render();
+  }
+
+  function render() {
+    var box = $('opts');
+    box.innerHTML = '';
+    SERVERS.forEach(function (srv, i) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'opt' + (i === current ? ' on' : '');
+      b.innerHTML = '<span><b></b><i></i><br><span></span></span>';
+      var inner = b.firstChild;
+      inner.querySelector('b').textContent = srv.n + (i === current ? ' ✓' : '');
+      inner.querySelector('i').textContent = srv.sandbox ? 'No pop-ups' : 'May show ads';
+      inner.querySelector('i').className = srv.sandbox ? 'safe' : 'ads';
+      inner.lastChild.textContent = srv.d;
+      b.onclick = function () { close(); load(i); };
+      box.appendChild(b);
     });
-}
+  }
 
-function openModal(){document.getElementById('modal').classList.add('open')}
-function closeModal(){document.getElementById('modal').classList.remove('open')}
-document.getElementById('modal').addEventListener('click',function(e){if(e.target===this)closeModal()});
+  function open() { $('modal').classList.add('open'); }
+  function close() { $('modal').classList.remove('open'); }
+  $('srvBtn').onclick = open;
+  $('closeModal').onclick = close;
+  $('modal').addEventListener('click', function (ev) { if (ev.target === this) close(); });
+  $('tryNext').onclick = function () { load((current + 1) % SERVERS.length); };
 
-document.addEventListener('keydown',function(e){
-    if(e.key==='Escape'){
-        if(document.getElementById('modal').classList.contains('open'))closeModal();
-        else toggleBar();
-    }
-    if(e.key==='f'||e.key==='F') toggleBar();
-});
+  function setEp(ns, ne) {
+    s = ns; e = ne;
+    var q = new URLSearchParams(location.search);
+    q.set('s', s); q.set('e', e);
+    history.replaceState(null, '', '?' + q.toString());
+    load(current);
+  }
+  if (type === 'tv') {
+    // Episode counts per season, so Prev/Next can cross season boundaries
+    var counts = {};
+    fetch('/api/movies/' + encodeURIComponent(id) + '?type=tv')
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) { (d && d.seasons || []).forEach(function (x) { counts[x.season_number] = x.episode_count; }); updateNav(); })
+      .catch(function () {});
+    var updateNav = function () {
+      $('prev').disabled = s === 1 && e === 1;
+      $('next').disabled = !!counts[s] && e >= counts[s] && !counts[s + 1];
+    };
+    $('epNav').hidden = false;
+    updateNav();
+    $('prev').onclick = function () {
+      if (e > 1) setEp(s, e - 1);
+      else if (s > 1) setEp(s - 1, counts[s - 1] || 1);
+      updateNav();
+    };
+    $('next').onclick = function () {
+      if (counts[s] && e >= counts[s]) { if (counts[s + 1]) setEp(s + 1, 1); }
+      else setEp(s, e + 1);
+      updateNav();
+    };
+  }
 
-init();
+  function hideBar() { bar.classList.add('hide'); }
+  function showBar() { bar.classList.remove('hide'); clearTimeout(hideTimer); hideTimer = setTimeout(hideBar, 6000); }
+  $('hideBtn').onclick = hideBar;
+  $('showBar').onclick = showBar;
+  document.addEventListener('mousemove', function (ev) { if (ev.clientY < 60) showBar(); });
+  document.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Escape') close();
+    if (ev.key === 'f' || ev.key === 'F') { bar.classList.contains('hide') ? showBar() : hideBar(); }
+  });
+
+  if (!id) {
+    $('status').textContent = 'No title selected.';
+    $('srvBtn').disabled = true;
+    return;
+  }
+  load(current);
+  showBar();
+})();
 </script>
 </body>
 </html>

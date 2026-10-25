@@ -1,50 +1,50 @@
 # StreamBreaker Backend (API + Telegram Bot)
 
-This directory contains the Python backend for StreamBreaker. It runs a FastAPI server and a Telegram bot simultaneously.
+The hub of StreamBreaker. One process (`start.py`) runs:
+
+- **FastAPI** (`api_server.py`): TMDB catalogue, torrent search (`torrent_scraper.py`), the
+  `/api/magnet/<hash>` page used by Telegram buttons, and the `/api/sync/*` endpoints the
+  local download worker talks to.
+- **Telegram bot** `@StreamBreakerBot` (`bot1_receptionist.py`): search, magnet links,
+  and "Send me the file here" requests.
+
+The frontend (Netlify) proxies `/api/*` here. The local worker (`../request_processor.py`,
+runs on the PC with Radarr/Sonarr) pulls requests from here and pushes uploaded files back.
 
 ## Deployment on Render (Free Tier)
 
-1. **Create a GitHub Repository**:
-   - Push this entire folder (`streambreaker-backend`) to a new repository on GitHub.
-   
-2. **Deploy to Render**:
-   - Log in to **[Render](https://render.com/)** using your GitHub account.
-   - Click **New +** and select **Web Service**.
-   - Select your newly created `streambreaker-backend` repository.
+1. New **Web Service** from this repository, root directory `streambreaker-backend`.
+2. **Build command**: `pip install -r requirements.txt`
+3. **Start command**: `python start.py`
+4. **Environment variables**:
 
-3. **Configure the Web Service**:
-   - **Name**: `streambreaker-api` (or any name you prefer)
-   - **Runtime**: `Python 3`
-   - **Build Command**: `pip install -r requirements.txt`
-   - **Start Command**: `python start.py`
-   - **Instance Type**: `Free`
+| Variable | Required | What it is |
+|---|---|---|
+| `TMDB_API_KEY` | yes | TMDB API key |
+| `BOT1_TOKEN` | yes | `@StreamBreakerBot` token. Run the bot **only here** — one token can't poll in two places |
+| `ADMIN_USER_ID` | yes | Your Telegram user ID (admin commands, request alerts) |
+| `CHANNEL_ID` | yes | Private storage channel, e.g. `-100…`. `@StreamBreakerBot` must be an admin of it |
+| `SYNC_SECRET` | yes | Shared secret with the local worker (same value in both `.env` files) |
+| `SITE_URL` | yes | Frontend URL, e.g. `https://streambreaker.netlify.app` (bot "Open on website" buttons) |
+| `API_PUBLIC_URL` | no | This service's public URL (default `https://telegrambot-p8yg.onrender.com`) |
+| `BOT_USERNAME` | no | Bot username for website deep links (default `StreamBreakerBot`) |
+| `WATCH_REGION` | no | Country for "Where to watch legally" (default `IN`) |
+| `GEMINI_API_KEYS` | no | Comma-separated Gemini keys for `/recommend` |
+| `NVIDIA_API_KEY`, `NVIDIA_MODEL` | no | Optional NVIDIA model for `/recommend` |
+| `RUN_BOT` | no | `0` runs the API without the bot |
 
-4. **Add Environment Variables**:
-   Under the **Environment** tab, click **Add Environment Variable** and add the keys from your `.env` file:
-   - `TMDB_API_KEY`: Your TMDB API key
-   - `GEMINI_API_KEY`: Your Gemini API key
-   - `BOT1_TOKEN`: Your Telegram Bot token
-   - `ADMIN_USER_ID`: Your Telegram User ID
-   - `CHANNEL_ID`: Your Telegram Channel ID
-   - `SYNC_SECRET`: Your sync secret key
-   - `SITE_URL`: The URL of your frontend (e.g. `https://streambreaker.netlify.app` - you can update this after deploying to Netlify)
+Render's free disk is wiped on every deploy/restart. The worker re-uploads the library index
+every 30 minutes, so library lookups recover on their own; requests that were still waiting
+when the disk was wiped have to be sent again.
 
-5. **Deploy**:
-   - Click **Deploy Web Service**.
-   - Render will build and start your application. It will provide a URL like `https://streambreaker-api.onrender.com`.
+## Running locally
 
-## Running Locally
+```bash
+python -m venv .venv
+.venv\Scripts\activate          # macOS/Linux: source .venv/bin/activate
+pip install -r requirements.txt
+RUN_BOT=0 python start.py       # API only, so you don't steal updates from the live bot
+```
 
-1. Create a virtual environment:
-   ```bash
-   python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   ```
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-3. Run the application:
-   ```bash
-   python start.py
-   ```
+If your ISP blocks TMDB (Jio does, by DNS), set `DNS_SERVERS=1.1.1.1,8.8.8.8` and
+`pip install aiodns`, or change your PC's DNS.

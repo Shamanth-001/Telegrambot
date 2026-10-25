@@ -1,503 +1,535 @@
 """
 StreamBreaker Torrent Scraper
-Scrapes 1337x and The Pirate Bay for movie/series torrent links in real-time.
-Returns structured results with quality, size, seeders, and magnet links.
+
+Searches several public torrent indexes in parallel and returns magnet links
+ranked by relevance and seeders:
+
+  - Knaben     (aggregator API — best general coverage incl. Indian titles)
+  - YTS        (movies, exact match by IMDb ID)
+  - EZTV       (TV, exact match by IMDb ID + season/episode)
+  - TorrentsCSV / APIBay (fallbacks)
+
+Results are cached in memory for a short time so the website and the Telegram
+bot can reuse the same search.
 """
 
-import aiohttp
 import asyncio
-import re
 import logging
-from dataclasses import dataclass, asdict
-from typing import Optional
-from urllib.parse import quote_plus, urljoin
+import re
+import time
+from dataclasses import asdict, dataclass, field
+from urllib.parse import quote, quote_plus
+
+import aiohttp
 
 logger = logging.getLogger(__name__)
 
-# --- Headers to mimic a real Chrome browser ---
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate",
-    "Connection": "keep-alive",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Sec-Fetch-User": "?1",
-    "Upgrade-Insecure-Requests": "1",
-    "Cache-Control": "max-age=0",
-    "sec-ch-ua": '"Chromium";v="126", "Google Chrome";v="126", "Not-A.Brand";v="8"',
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": '"Windows"',
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
 }
 
-# 1337x mirrors (fallback chain)
-MIRRORS_1337X = [
-    "https://1337x.to",
-    "https://1337x.st",
-    "https://1337x.gd",
-    "https://1337x.ws",
-    "https://1377x.to",
+TRACKERS = [
+    "udp://tracker.opentrackr.org:1337/announce",
+    "udp://open.stealth.si:80/announce",
+    "udp://tracker.torrent.eu.org:451/announce",
+    "udp://explodie.org:6969/announce",
+    "udp://open.demonii.com:1337/announce",
 ]
 
-# TPB / Pirate Bay API proxies
-APIBAY_URLS = [
-    "https://apibay.org",
-    "https://tpb.party",
-]
+YTS_BASES = ["https://movies-api.accel.li", "https://yts.lt", "https://yts.am"]
+EZTV_BASES = ["https://eztvx.to", "https://eztv.re", "https://eztv.wf"]
+APIBAY_BASES = ["https://apibay.org"]
+
+REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=12)
+EZTV_TIMEOUT = aiohttp.ClientTimeout(total=7)
+CACHE_TTL = 20 * 60
+_cache: dict[tuple, tuple[float, list]] = {}
 
 
 @dataclass
 class TorrentResult:
     title: str
-    quality: str
+    quality: str        # 4K / 1080p / 720p / 480p / Unknown
+    rip: str            # BluRay / WEB / HDTV / DVD / CAM / ""
+    codec: str          # x265 / x264 / AV1 / ""
     size: str
+    size_bytes: int
     seeders: int
     leechers: int
+    info_hash: str
     magnet: str
     source: str
+    is_cam: bool
+    languages: list[str] = field(default_factory=list)  # audio languages named in the release
 
     def to_dict(self):
         return asdict(self)
 
 
-def _detect_quality(title: str) -> str:
-    """Extract quality tag from torrent title."""
-    t = title.upper()
-    if "2160P" in t or "4K" in t or "UHD" in t:
-        return "4K"
-    if "1080P" in t or "FULLHD" in t or "FHD" in t:
-        return "1080p"
-    if "720P" in t or "HD" in t:
-        return "720p"
-    if "480P" in t:
-        return "480p"
-    if "CAM" in t or "HDCAM" in t or "HDTS" in t or "TELESYNC" in t:
-        return "CAM"
-    return "Unknown"
+# ============================================================
+# Helpers
+# ============================================================
+
+def build_magnet(info_hash: str, name: str) -> str:
+    tr = "".join(f"&tr={quote(t, safe='')}" for t in TRACKERS)
+    return f"magnet:?xt=urn:btih:{info_hash}&dn={quote_plus(name)}{tr}"
 
 
-def _format_size(size_bytes: int) -> str:
-    """Convert bytes to human-readable size string."""
-    if size_bytes <= 0:
+def short_magnet(info_hash: str, name: str) -> str:
+    """Compact magnet (fewer trackers) — fits better in Telegram messages."""
+    tr = "".join(f"&tr={quote(t, safe='')}" for t in TRACKERS[:2])
+    return f"magnet:?xt=urn:btih:{info_hash}&dn={quote_plus(name)[:80]}{tr}"
+
+
+def format_size(size_bytes: int) -> str:
+    if not size_bytes or size_bytes <= 0:
         return "Unknown"
     gb = size_bytes / (1024 ** 3)
     if gb >= 1:
-        return f"{gb:.1f} GB"
-    mb = size_bytes / (1024 ** 2)
-    return f"{mb:.0f} MB"
+        return f"{gb:.2f} GB"
+    return f"{size_bytes / (1024 ** 2):.0f} MB"
 
 
-def _normalize(text: str) -> str:
-    """Normalize a string for comparison: lowercase, remove punctuation, collapse spaces."""
-    t = text.lower()
-    t = re.sub(r'[^a-z0-9\s]', ' ', t)  # Replace non-alphanumeric with space
-    t = re.sub(r'\s+', ' ', t).strip()  # Collapse whitespace
-    return t
+_CAM_RE = re.compile(r"\b(cam|camrip|hdcam|ts|hdts|telesync|tc|telecine|hdtc|pre-?dvd|scr|dvdscr|screener)\b", re.I)
 
 
-def _relevance_score(query: str, torrent_title: str) -> float:
-    """
-    Score how relevant a torrent title is to the search query.
-    Returns 0.0-1.0 (1.0 = perfect match).
-    
-    Strategy:
-    - Extract meaningful keywords from the query (ignore year, common words)
-    - Use word-boundary matching (not substring) to avoid false positives
-    - Require ALL distinctive title words to be present for a high score
-    - Penalize when torrent has many extra meaningful words not in the query
-    - Give bonus for exact phrase matches
-    """
-    q_norm = _normalize(query)
-    t_norm = _normalize(torrent_title)
-    
-    # Quick reject: adult content
-    if '18' in torrent_title and '+' in torrent_title:
-        return 0.0
-    
-    # Split into word sets for word-boundary matching
-    t_words = set(t_norm.split())
-    
-    # Extract keywords (skip common noise words, years, and season/episode tags)
-    noise = {'the', 'a', 'an', 'of', 'and', 'in', 'to', 'for', 'on', 'at', 'by', 'is', 'it', 'from'}
-    season_ep = set()
-    for i in range(1, 30):
-        season_ep.add(f's{i:02d}')
-        season_ep.add(f'e{i:02d}')
-    noise |= season_ep
-    
-    # Technical torrent words to ignore when comparing
-    tech_words = {'1080p', '720p', '480p', '2160p', '4k', 'uhd', 'hdr', 'bluray', 'brrip', 'webrip',
-                  'web', 'dl', 'dvdrip', 'hdtv', 'x264', 'x265', 'hevc', 'aac', 'ac3', 'dts',
-                  'yify', 'yts', 'rarbg', 'eztv', 'nf', 'amzn', 'imax', 'proper', 'remastered',
-                  'extended', 'directors', 'cut', 'complete', 'season', 'pack', 'dual', 'audio',
-                  'subs', 'subtitle', 'dubbed', 'multi', 'remux', 'encode', 'mkv', 'mp4', 'avi',
-                  'xvid', 'divx', '10bit', '5', '1', '7', 'opus', 'flac', 'truehd', 'atmos',
-                  'hq', 'ts', 'cam', 'hdcam', 'telesync', 'dvdscr', 'screener', 'av1',
-                  'nl', 'en', 'ru', 'fr', 'de', 'es', 'pt', 'hindi', 'english', 'tamil', 'telugu'}
-    
-    q_words = [w for w in q_norm.split() if w not in noise and not re.match(r'^(19|20)\d{2}$', w) and w not in tech_words]
-    
-    if not q_words:
-        return 0.5  # Can't determine relevance
-    
-    # Distinctive words from torrent title (not noise, not tech)
-    t_meaningful = [w for w in t_norm.split() if w not in noise and w not in tech_words 
-                    and not re.match(r'^(19|20)\d{2}$', w) and len(w) >= 3]
-    
-    # Distinctive words from query
-    distinctive_words = [w for w in q_words if len(w) >= 3]
-    
-    # Word-boundary matching: check each query word against torrent word set
-    matched = 0
-    for w in q_words:
-        if w in t_words:
-            matched += 1
-        elif any(w in tw for tw in t_words if len(tw) > len(w)):
-            matched += 0.7
-    
-    word_score = matched / len(q_words)
-    
-    # Strict check: ALL distinctive words (3+ chars) must be present
-    if len(distinctive_words) >= 2:
-        distinctive_matched = sum(1 for w in distinctive_words if w in t_words or 
-                                   any(w in tw for tw in t_words if len(tw) > len(w)))
-        distinctive_ratio = distinctive_matched / len(distinctive_words)
-        if distinctive_ratio < 0.75:
-            word_score *= 0.3
-    
-    # Extra word penalty: if torrent has many meaningful words NOT in the query,
-    # it's probably a different title (e.g., "Interstellar Wars" vs "Interstellar")
-    q_meaningful_set = set(distinctive_words)
-    extra_words = [w for w in t_meaningful if w not in q_meaningful_set 
-                   and not any(w in qw or qw in w for qw in q_meaningful_set)]
-    
-    if len(extra_words) >= 2 and len(distinctive_words) <= 2:
-        # Short query title but torrent has many extra words — probably wrong movie
-        word_score *= 0.4
-    elif len(extra_words) >= 3:
-        word_score *= 0.6
-    
-    # Bonus: check if the main title phrase (without year) appears as a substring
-    q_no_year = re.sub(r'\b(19|20)\d{2}\b', '', q_norm).strip()
-    q_no_year = re.sub(r'\s+', ' ', q_no_year).strip()
-    phrase_bonus = 0.2 if q_no_year and q_no_year in t_norm else 0.0
-    
-    return min(1.0, word_score + phrase_bonus)
+def parse_tags(title: str) -> tuple[str, str, str, bool]:
+    """Return (quality, rip, codec, is_cam) parsed from a release name."""
+    t = title.replace(".", " ").replace("_", " ")
+    tu = t.upper()
+
+    if re.search(r"\b(2160P|4K|UHD)\b", tu):
+        quality = "4K"
+    elif re.search(r"\b1080P\b", tu):
+        quality = "1080p"
+    elif re.search(r"\b720P\b", tu):
+        quality = "720p"
+    elif re.search(r"\b(480P|576P|360P)\b", tu):
+        quality = "480p"
+    else:
+        quality = "Unknown"
+
+    is_cam = bool(_CAM_RE.search(t))
+    if is_cam:
+        rip = "CAM"
+    elif re.search(r"\b(BLU-?RAY|BRRIP|BDRIP|BDREMUX|REMUX)\b", tu):
+        rip = "BluRay"
+    elif re.search(r"\b(WEB-?DL|WEBRIP|WEB|AMZN|NF|DSNP|HMAX|ATVP)\b", tu):
+        rip = "WEB"
+    elif re.search(r"\bHDTV\b", tu):
+        rip = "HDTV"
+    elif re.search(r"\bDVD(RIP)?\b", tu):
+        rip = "DVD"
+    else:
+        rip = ""
+
+    if re.search(r"\b(X265|H 265|H265|HEVC)\b", tu):
+        codec = "x265"
+    elif re.search(r"\bAV1\b", tu):
+        codec = "AV1"
+    elif re.search(r"\b(X264|H 264|H264|AVC)\b", tu):
+        codec = "x264"
+    else:
+        codec = ""
+
+    return quality, rip, codec, is_cam
 
 
-# ============================================================
-# 1337x Scraper
-# ============================================================
-
-async def _fetch_html(session: aiohttp.ClientSession, url: str, timeout: int = 15) -> Optional[str]:
-    """Fetch HTML from a URL with error handling."""
-    try:
-        async with session.get(
-            url,
-            headers=HEADERS,
-            timeout=aiohttp.ClientTimeout(total=timeout),
-            ssl=False,  # Skip SSL verification for mirrors
-        ) as resp:
-            if resp.status == 200:
-                return await resp.text()
-            logger.warning(f"HTTP {resp.status} from {url}")
-    except Exception as e:
-        logger.warning(f"Fetch error for {url}: {e}")
-    return None
+LANGUAGE_NAMES = {
+    "kn": "Kannada", "hi": "Hindi", "ta": "Tamil", "te": "Telugu", "ml": "Malayalam",
+    "mr": "Marathi", "bn": "Bengali", "pa": "Punjabi", "en": "English",
+}
+_LANG_RE = re.compile(r"\b(" + "|".join(LANGUAGE_NAMES.values()) + r")\b", re.I)
 
 
-def _extract_1337x_links(html: str, base_url: str) -> list[str]:
-    """Extract torrent detail page links from 1337x search results using regex."""
-    pattern = r'href="(/torrent/\d+/[^"]+/)"'
-    matches = re.findall(pattern, html)
-    return [urljoin(base_url, m) for m in matches[:12]]
+def parse_languages(title: str) -> list[str]:
+    found = []
+    for m in _LANG_RE.finditer(title.replace(".", " ").replace("_", " ")):
+        name = m.group(1).capitalize()
+        if name not in found:
+            found.append(name)
+    if re.search(r"\b(multi|dual[ ._-]?audio)\b", title, re.I) and "Multi" not in found:
+        found.append("Multi")
+    return found
 
 
-def _extract_1337x_magnet(html: str) -> Optional[str]:
-    """Extract magnet link from a 1337x torrent detail page."""
-    match = re.search(r'href="(magnet:\?xt=urn:btih:[^"]+)"', html)
-    return match.group(1) if match else None
+# Not a video release: soundtracks, music, books, games, samples
+_JUNK_RE = re.compile(r"(?i)\b(soundtracks?|ost|flac|mp3|aac[ ._-]?album|album|discography|e-?book|epub|pdf|"
+                      r"audiobook|pc[ ._-]?game|repack[ ._-]?by|sample|trailer)\b")
 
 
-def _extract_1337x_info(html: str) -> dict:
-    """Extract size, seeders, leechers from 1337x detail page."""
-    info = {"size": "Unknown", "seeders": 0, "leechers": 0}
-
-    size_match = re.search(r'<li>\s*<strong>Total size</strong>\s*<span>([\d.]+ [A-Za-z]+)</span>', html)
-    if size_match:
-        info["size"] = size_match.group(1)
-
-    seed_match = re.search(r'<span class="seeds">\s*(\d+)\s*</span>', html)
-    if seed_match:
-        info["seeders"] = int(seed_match.group(1))
-
-    leech_match = re.search(r'<span class="leeches">\s*(\d+)\s*</span>', html)
-    if leech_match:
-        info["leechers"] = int(leech_match.group(1))
-
-    return info
-
-
-async def _scrape_1337x_detail(session: aiohttp.ClientSession, url: str) -> Optional[TorrentResult]:
-    """Scrape a single 1337x torrent detail page."""
-    html = await _fetch_html(session, url)
-    if not html:
+def _make(title, info_hash, size_bytes, seeders, leechers, source) -> TorrentResult | None:
+    if _JUNK_RE.search(title or ""):
         return None
-
-    magnet = _extract_1337x_magnet(html)
-    if not magnet:
+    info_hash = (info_hash or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40}|[a-z2-7]{32}", info_hash):
         return None
-
-    info = _extract_1337x_info(html)
-
-    title_match = re.search(r'<h1[^>]*>([^<]+)</h1>', html)
-    title = title_match.group(1).strip() if title_match else url.split("/")[-2].replace("-", " ")
-
+    quality, rip, codec, is_cam = parse_tags(title)
+    size_bytes = int(size_bytes or 0)
     return TorrentResult(
-        title=title,
-        quality=_detect_quality(title),
-        size=info["size"],
-        seeders=info["seeders"],
-        leechers=info["leechers"],
-        magnet=magnet,
-        source="1337x",
+        languages=parse_languages(title),
+        title=title.strip(),
+        quality=quality,
+        rip=rip,
+        codec=codec,
+        size=format_size(size_bytes),
+        size_bytes=size_bytes,
+        seeders=int(seeders or 0),
+        leechers=int(leechers or 0),
+        info_hash=info_hash,
+        magnet=build_magnet(info_hash, title.strip()),
+        source=source,
+        is_cam=is_cam,
     )
 
 
-async def search_1337x(query: str, media_type: str = "movie") -> list[TorrentResult]:
-    """Search 1337x for torrents. Tries mirrors if primary is down."""
-    category = "Movies" if media_type == "movie" else "TV"
-    encoded = quote_plus(query)
-    results = []
-
-    connector = aiohttp.TCPConnector(ssl=False)
-    async with aiohttp.ClientSession(connector=connector) as session:
-        html = None
-        used_base = MIRRORS_1337X[0]
-
-        for mirror in MIRRORS_1337X:
-            search_url = f"{mirror}/category-search/{encoded}/{category}/1/"
-            html = await _fetch_html(session, search_url)
-            if html and "torrent" in html.lower():
-                used_base = mirror
-                break
-            # Also try plain search if category search fails
-            search_url = f"{mirror}/search/{encoded}/1/"
-            html = await _fetch_html(session, search_url)
-            if html and "torrent" in html.lower():
-                used_base = mirror
-                break
-
-        if not html:
-            logger.error("All 1337x mirrors failed")
-            return results
-
-        links = _extract_1337x_links(html, used_base)
-        if not links:
-            return results
-
-        sem = asyncio.Semaphore(3)
-
-        async def fetch_with_sem(url):
-            async with sem:
-                await asyncio.sleep(0.3)  # Small delay between requests
-                return await _scrape_1337x_detail(session, url)
-
-        tasks = [fetch_with_sem(link) for link in links]
-        detail_results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        for r in detail_results:
-            if isinstance(r, TorrentResult) and r.seeders > 0:
-                results.append(r)
-
-    return results
+async def _get_json(session, url, params=None, timeout=None):
+    try:
+        async with session.get(url, params=params, headers=HEADERS,
+                               timeout=timeout or REQUEST_TIMEOUT, ssl=False) as resp:
+            if resp.status == 200:
+                return await resp.json(content_type=None)
+            logger.warning(f"HTTP {resp.status} from {url}")
+    except Exception as e:
+        logger.warning(f"Fetch error {url}: {e}")
+    return None
 
 
 # ============================================================
-# APIBay (The Pirate Bay API) — JSON API, no HTML scraping
+# Matching
 # ============================================================
 
-async def search_apibay(query: str, media_type: str = "movie") -> list[TorrentResult]:
-    """Search via APIBay (TPB proxy API). Returns JSON directly."""
-    results = []
-    encoded = quote_plus(query)
-    # Categories: 201 = Movies, 205 = TV Shows
+_NOISE = {"the", "a", "an", "of", "and", "in", "to", "for", "on", "at", "by", "is", "it", "from"}
+
+
+def _normalize(text: str) -> str:
+    t = text.lower().replace("&", " and ").replace("'", "").replace("’", "")
+    t = re.sub(r"[^a-z0-9\s]", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    # Join spelled-out initials so "K.G.F" and "KGF" compare equal
+    return re.sub(r"\b[a-z](?: [a-z]\b)+", lambda m: m.group(0).replace(" ", ""), t)
+
+
+def _title_words(title: str) -> list[str]:
+    return [w for w in _normalize(title).split() if w not in _NOISE]
+
+
+# Words that may follow the title in a release name (year/quality/language/edition tags)
+_TAIL_OK = {
+    "kannada", "hindi", "tamil", "telugu", "malayalam", "english", "marathi", "bengali", "punjabi",
+    "multi", "dual", "dubbed", "audio", "org", "original", "uncut", "extended", "remastered", "proper",
+    "repack", "hq", "hdrip", "webrip", "web", "dl", "bluray", "brrip", "bdrip", "dvdrip", "hdtv", "x264",
+    "x265", "hevc", "imax", "directors", "theatrical", "esub", "esubs", "subs", "nf", "amzn", "zee5",
+    "hotstar", "jiohotstar", "aha", "sunnxt", "pre", "dvdscr", "camrip", "cam", "hdcam", "hdts", "ts",
+    "tc", "predvd", "complete", "season", "uhd", "hdr", "remux", "v2", "v3", "yts", "yify", "rarbg",
+    "us", "uk", "au", "nz", "ca", "in",
+}
+
+
+def _title_matches(title: str, release: str) -> bool:
+    """The release name must start with the title, followed by a year/quality/language tag."""
+    words = _title_words(title)
+    if not words:
+        return True
+    # Drop a leading [group] / (tag) and "www.site.tld - " prefixes
+    raw = re.sub(r"^\s*(\[[^\]]*\]|\([^)]*\)|【[^】]*】)\s*", "", release)
+    rel = re.sub(r"^www \S+ \S+ ", "", _normalize(raw))
+    rel_words = [w for w in rel.split() if w not in _NOISE]
+    n = len(words)
+    if rel_words[:n] != words:
+        return False
+    nxt = rel_words[n] if len(rel_words) > n else ""
+    if not nxt or nxt[0].isdigit() or nxt in _TAIL_OK or re.fullmatch(r"s\d{1,2}(e\d{1,3})?", nxt):
+        return True
+    # "Toxic" must not match "A Toxic Love Story"; long titles are distinctive enough
+    return n >= 3
+
+
+def _year_ok(release: str, year: str, title: str) -> bool:
+    """Reject releases that clearly belong to a different year (e.g. Dune 1984 vs 2021)."""
+    if not year:
+        return True
+    title_years = set(re.findall(r"\b(?:19|20)\d{2}\b", title))
+    years = [y for y in re.findall(r"\b(?:19|20)\d{2}\b", release) if y not in title_years]
+    if not years:
+        return True
+    y = int(year)
+    return any(abs(int(r) - y) <= 1 for r in years)
+
+
+_SE_RE = re.compile(r"\bs(\d{1,2})[ ._-]?e(\d{1,3})\b|\b(\d{1,2})x(\d{2,3})\b", re.I)
+_SEASON_RANGE_RE = re.compile(r"\bs(\d{1,2})\s*-\s*s?(\d{1,2})\b", re.I)
+_SEASON_RE = re.compile(r"\b(?:s|season[ ._-]?)(\d{1,2})\b(?![ ._-]?e\d)", re.I)
+
+
+def _episode_ok(release: str, season: int, episode: int) -> bool:
+    """For series: match the exact episode, or a pack that contains the season."""
+    if not season:
+        return True
+    eps = [(int(m.group(1) or m.group(3)), int(m.group(2) or m.group(4))) for m in _SE_RE.finditer(release)]
+    if episode:
+        return (season, episode) in eps
+    # Season pack wanted: no single-episode releases
+    if eps:
+        return False
+    for m in _SEASON_RANGE_RE.finditer(release):
+        if int(m.group(1)) <= season <= int(m.group(2)):
+            return True
+    seasons = [int(s) for s in _SEASON_RE.findall(release)]
+    if seasons:
+        return season in seasons
+    return bool(re.search(r"\bcomplete\b", release, re.I))
+
+
+# ============================================================
+# Sources
+# ============================================================
+
+async def search_knaben(session, query: str) -> list[TorrentResult]:
+    payload = {
+        "search_type": "100%",
+        "search_field": "title",
+        "query": query,
+        "order_by": "seeders",
+        "order_direction": "desc",
+        "size": 60,
+        "hide_unsafe": True,
+        "hide_xxx": True,
+    }
+    try:
+        async with session.post("https://api.knaben.org/v1", json=payload, headers=HEADERS,
+                                timeout=REQUEST_TIMEOUT, ssl=False) as resp:
+            if resp.status != 200:
+                logger.warning(f"Knaben HTTP {resp.status}")
+                return []
+            data = await resp.json(content_type=None)
+    except Exception as e:
+        logger.warning(f"Knaben error: {e}")
+        return []
+
+    out = []
+    for h in data.get("hits", []):
+        r = _make(h.get("title", ""), h.get("hash"), h.get("bytes"),
+                  h.get("seeders"), h.get("peers"), h.get("tracker") or "Knaben")
+        if r:
+            out.append(r)
+    return out
+
+
+async def search_yts(session, imdb_id: str = "", query: str = "") -> list[TorrentResult]:
+    term = imdb_id or query
+    if not term:
+        return []
+    data = None
+    for base in YTS_BASES:
+        data = await _get_json(session, f"{base}/api/v2/list_movies.json",
+                               {"query_term": term, "limit": 5})
+        if data and data.get("status") == "ok":
+            break
+    movies = ((data or {}).get("data") or {}).get("movies") or []
+    if imdb_id:
+        movies = [m for m in movies if m.get("imdb_code") == imdb_id]
+
+    out = []
+    for m in movies[:1]:
+        name = m.get("title_long") or m.get("title", "")
+        for t in m.get("torrents", []):
+            label = f"{name} [{t.get('quality', '')}] [{t.get('type', '')}] [{t.get('video_codec', '')}] YTS"
+            r = _make(label, t.get("hash"), t.get("size_bytes"), t.get("seeds"), t.get("peers"), "YTS")
+            if r:
+                out.append(r)
+    return out
+
+
+async def search_eztv(session, imdb_id: str, season: int, episode: int) -> list[TorrentResult]:
+    if not imdb_id:
+        return []
+    numeric = imdb_id.replace("tt", "")
+    out = []
+    # Ask every mirror at once and use the first that answers (blocked mirrors just time out)
+    firsts = await asyncio.gather(*[
+        _get_json(session, f"{b}/api/get-torrents", {"imdb_id": numeric, "limit": 100, "page": 1}, timeout=EZTV_TIMEOUT)
+        for b in EZTV_BASES
+    ])
+    for base, first in zip(EZTV_BASES, firsts):
+        if not first or "torrents" not in first:
+            continue
+        pages = [first]
+        total = int(first.get("torrents_count") or 0)
+        extra = min((total - 1) // 100, 4)  # cap at 500 torrents
+        if extra > 0:
+            more = await asyncio.gather(*[
+                _get_json(session, f"{base}/api/get-torrents", {"imdb_id": numeric, "limit": 100, "page": p})
+                for p in range(2, extra + 2)
+            ])
+            pages += [m for m in more if m]
+        for page in pages:
+            for t in page.get("torrents") or []:
+                try:
+                    s, e = int(t.get("season") or 0), int(t.get("episode") or 0)
+                except ValueError:
+                    s, e = 0, 0
+                if season and s != season:
+                    continue
+                if episode and e != episode:
+                    continue
+                if season and not episode and e:
+                    continue  # season pack wanted
+                r = _make(t.get("title") or t.get("filename", ""), t.get("hash"), t.get("size_bytes"),
+                          t.get("seeds"), t.get("peers"), "EZTV")
+                if r:
+                    out.append(r)
+        break
+    return out
+
+
+async def search_torrents_csv(session, query: str) -> list[TorrentResult]:
+    data = await _get_json(session, "https://torrents-csv.com/service/search", {"q": query, "size": 30})
+    out = []
+    for t in (data or {}).get("torrents", []):
+        r = _make(t.get("name", ""), t.get("infohash"), t.get("size_bytes"),
+                  t.get("seeders"), t.get("leechers"), "TorrentsCSV")
+        if r:
+            out.append(r)
+    return out
+
+
+async def search_apibay(session, query: str, media_type: str) -> list[TorrentResult]:
     cat = "201" if media_type == "movie" else "205"
-
-    connector = aiohttp.TCPConnector(ssl=False)
-    async with aiohttp.ClientSession(connector=connector) as session:
-        data = None
-        for base_url in APIBAY_URLS:
-            api_url = f"{base_url}/q.php?q={encoded}&cat={cat}"
-            try:
-                async with session.get(
-                    api_url,
-                    headers=HEADERS,
-                    timeout=aiohttp.ClientTimeout(total=10),
-                    ssl=False,
-                ) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        if data and len(data) > 0 and data[0].get("id") != "0":
-                            break
-                        data = None
-            except Exception as e:
-                logger.warning(f"APIBay error ({base_url}): {e}")
-                continue
-
-        if not data:
-            return results
-
-        trackers = [
-            "udp://tracker.opentrackr.org:1337/announce",
-            "udp://open.stealth.si:80/announce",
-            "udp://tracker.torrent.eu.org:451/announce",
-            "udp://explodie.org:6969/announce",
-            "udp://tracker.tiny-vps.com:6969/announce",
-            "udp://tracker.cyberia.is:6969/announce",
-        ]
-        tracker_str = "&".join([f"tr={t}" for t in trackers])
-
-        for item in data[:15]:
+    out = []
+    for base in APIBAY_BASES:
+        data = await _get_json(session, f"{base}/q.php", {"q": query, "cat": cat})
+        if not isinstance(data, list):
+            continue
+        for item in data:
             if item.get("id") == "0":
                 continue
-
-            info_hash = item.get("info_hash", "")
-            name = item.get("name", "Unknown")
-            seeders = int(item.get("seeders", 0))
-            leechers = int(item.get("leechers", 0))
-            size_bytes = int(item.get("size", 0))
-
-            if seeders == 0 or not info_hash:
-                continue
-
-            magnet = f"magnet:?xt=urn:btih:{info_hash}&dn={quote_plus(name)}&{tracker_str}"
-
-            results.append(TorrentResult(
-                title=name,
-                quality=_detect_quality(name),
-                size=_format_size(size_bytes),
-                seeders=seeders,
-                leechers=leechers,
-                magnet=magnet,
-                source="TPB",
-            ))
-
-    return results
+            r = _make(item.get("name", ""), item.get("info_hash"), item.get("size"),
+                      item.get("seeders"), item.get("leechers"), "TPB")
+            if r:
+                out.append(r)
+        break
+    return out
 
 
 # ============================================================
-# YTS Scraper (public API)
+# Main entry point
 # ============================================================
 
-async def search_yts(query: str) -> list[TorrentResult]:
-    """Search YTS API for movie torrents. YTS only has movies, not series."""
-    results = []
-
-    yts_domains = ["https://yts.mx", "https://yts.lt", "https://yts.bz"]
-
-    connector = aiohttp.TCPConnector(ssl=False)
-    async with aiohttp.ClientSession(connector=connector) as session:
-        data = None
-        for domain in yts_domains:
-            api_url = f"{domain}/api/v2/list_movies.json"
-            try:
-                async with session.get(api_url, params={
-                    "query_term": query,
-                    "limit": 10,
-                    "sort_by": "seeds",
-                }, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=10), ssl=False) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        if data.get("data", {}).get("movies"):
-                            break
-                        data = None
-            except Exception as e:
-                logger.warning(f"YTS API error ({domain}): {e}")
-                continue
-
-        if not data:
-            return results
-
-    movies = data.get("data", {}).get("movies") or []
-
-    for movie in movies:
-        torrents = movie.get("torrents", [])
-        movie_title = movie.get("title_long", movie.get("title", "Unknown"))
-        for t in torrents:
-            torrent_hash = t.get("hash", "")
-            if not torrent_hash:
-                continue
-
-            title_encoded = quote_plus(movie_title)
-            magnet = (
-                f"magnet:?xt=urn:btih:{torrent_hash}"
-                f"&dn={title_encoded}"
-                f"&tr=udp://open.stealth.si:80/announce"
-                f"&tr=udp://tracker.opentrackr.org:1337/announce"
-                f"&tr=udp://tracker.torrent.eu.org:451/announce"
-                f"&tr=udp://explodie.org:6969/announce"
-            )
-
-            results.append(TorrentResult(
-                title=f"{movie_title} [{t.get('quality', '?')}] [{t.get('type', 'web')}]",
-                quality=t.get("quality", "Unknown"),
-                size=t.get("size", "Unknown"),
-                seeders=t.get("seeds", 0),
-                leechers=t.get("peers", 0),
-                magnet=magnet,
-                source="YTS",
-            ))
-
-    return results
-
-
-# ============================================================
-# Main search function — combines all sources
-# ============================================================
-
-async def search_torrents(query: str, media_type: str = "movie") -> list[TorrentResult]:
+async def search_torrents(
+    title: str,
+    media_type: str = "movie",
+    year: str = "",
+    imdb_id: str = "",
+    season: int = 0,
+    episode: int = 0,
+    limit: int = 30,
+    language: str = "",
+) -> list[TorrentResult]:
     """
-    Search all torrent sources in parallel and return combined, deduplicated results
-    filtered by relevance and sorted by seeders (highest first).
+    Search all sources in parallel. `title` is the clean title (no year / SxxEyy);
+    filters are applied with `year` for movies and `season`/`episode` for series.
+    `language` is the title's original language (ISO 639-1, e.g. "kn"); releases in
+    that language rank above dubs.
     """
-    tasks = [
-        search_1337x(query, media_type),
-        search_apibay(query, media_type),
-    ]
+    title = (title or "").strip()
+    if not title:
+        return []
+
+    key = (title.lower(), media_type, year, imdb_id, season, episode, language)
+    lang_name = LANGUAGE_NAMES.get(language, "") if language != "en" else ""
+    cached = _cache.get(key)
+    if cached and time.time() - cached[0] < CACHE_TTL:
+        return cached[1][:limit]
 
     if media_type == "movie":
-        tasks.append(search_yts(query))
+        query = f"{title} {year}".strip()
+    elif season and episode:
+        query = f"{title} S{season:02d}E{episode:02d}"
+    elif season:
+        query = f"{title} S{season:02d}"
+    else:
+        query = title
 
-    all_results = await asyncio.gather(*tasks, return_exceptions=True)
+    async with aiohttp.ClientSession() as session:
+        tasks = [search_knaben(session, query), search_apibay(session, query, media_type)]
+        if media_type == "movie":
+            tasks += [search_yts(session, imdb_id=imdb_id, query="" if imdb_id else query),
+                      search_torrents_csv(session, query)]
+        else:
+            tasks.append(search_eztv(session, imdb_id, season, episode))
+            if season and not episode:
+                # Packs are often named "Season 1" rather than "S01"
+                tasks.append(search_knaben(session, f"{title} Season {season}"))
+        if lang_name:
+            # Indian-language releases are usually tagged "Kannada", "Tamil", ...
+            tasks.append(search_knaben(session, f"{query} {lang_name}"))
+            tasks.append(search_torrents_csv(session, f"{title} {lang_name}"))
+        groups = await asyncio.gather(*tasks, return_exceptions=True)
 
-    combined: list[TorrentResult] = []
-    seen_hashes: set[str] = set()
-
-    for result_group in all_results:
-        if isinstance(result_group, Exception):
-            logger.error(f"Scraper error: {result_group}")
+    combined: dict[str, TorrentResult] = {}
+    for group in groups:
+        if isinstance(group, Exception):
+            logger.error(f"Scraper error: {group}")
             continue
-        for r in result_group:
-            # Deduplicate by info hash
-            hash_match = re.search(r'btih:([a-fA-F0-9]+)', r.magnet)
-            if hash_match:
-                info_hash = hash_match.group(1).lower()
-                if info_hash in seen_hashes:
+        for r in group:
+            if r.seeders <= 0:
+                continue
+            # YTS results are matched by IMDb ID, so their titles are trusted
+            trusted = r.source == "YTS" and imdb_id
+            if not trusted:
+                if not _title_matches(title, r.title):
                     continue
-                seen_hashes.add(info_hash)
-            combined.append(r)
+                if media_type == "movie" and not _year_ok(r.title, year, title):
+                    continue
+                if media_type != "movie" and not _episode_ok(r.title, season, episode):
+                    continue
+            existing = combined.get(r.info_hash)
+            if existing is None or r.seeders > existing.seeders:
+                combined[r.info_hash] = r
 
-    # Filter by relevance — discard results below 50% match
-    scored = []
-    for r in combined:
-        score = _relevance_score(query, r.title)
-        if score >= 0.5:
-            scored.append((score, r))
+    def is_multi_season(r: TorrentResult) -> bool:
+        if media_type == "movie" or not season or episode:
+            return False
+        return bool(_SEASON_RANGE_RE.search(r.title) or re.search(r"complete[ ._-]series", r.title, re.I))
 
-    # Sort: relevance first (desc), then seeders (desc)
-    scored.sort(key=lambda x: (x[0], x[1].seeders), reverse=True)
+    def is_dub(r: TorrentResult) -> bool:
+        """Tagged only with other languages (e.g. a Hindi dub of a Kannada film)."""
+        if not lang_name or not r.languages:
+            return False
+        return lang_name not in r.languages and "Multi" not in r.languages
 
-    return [r for _, r in scored]
+    results = sorted(combined.values(), key=lambda r: (r.is_cam, is_dub(r), is_multi_season(r), -r.seeders))
+    _cache[key] = (time.time(), results)
+    if len(_cache) > 500:
+        oldest = sorted(_cache.items(), key=lambda kv: kv[1][0])[:100]
+        for k, _ in oldest:
+            _cache.pop(k, None)
+    return results[:limit]
+
+
+def pick_best(results: list[TorrentResult], max_items: int = 5,
+              max_bytes: int = 25 * 1024 ** 3) -> list[TorrentResult]:
+    """Pick a short, varied list: the best-seeded release for each quality, non-CAM first.
+    Releases bigger than `max_bytes` (e.g. 90 GB remuxes) are only used if nothing else exists."""
+    reasonable = [r for r in results if not r.size_bytes or r.size_bytes <= max_bytes]
+    if reasonable:
+        results = reasonable
+    order = ["1080p", "720p", "4K", "480p", "Unknown"]
+    # `results` is already ranked, so the first hit per quality is the best one
+    best: dict[str, TorrentResult] = {}
+    for r in results:
+        if not r.is_cam and r.quality not in best:
+            best[r.quality] = r
+    picked = [best[q] for q in order if q in best]
+    # Fill remaining slots with the next best-seeded non-duplicates
+    for r in results:
+        if len(picked) >= max_items:
+            break
+        if r not in picked and not r.is_cam:
+            picked.append(r)
+    if not picked:  # only CAM copies exist (fresh theatrical release)
+        picked = results[:max_items]
+    return picked[:max_items]

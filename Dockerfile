@@ -1,9 +1,15 @@
-FROM node:18-alpine
+FROM python:3.13-slim
+
 WORKDIR /app
-COPY package*.json ./
-RUN npm ci --only=production
+
+# Install dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy source code
 COPY . .
-EXPOSE 3000
-CMD ["node", "bot.js"]
 
+# Ensure start script is executable
+RUN chmod +x start.sh
 
+CMD ["./start.sh"]

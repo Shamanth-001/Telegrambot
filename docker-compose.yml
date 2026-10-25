@@ -1,0 +1,23 @@
+services:
+  streambreaker-bots:
+    build: .
+    container_name: streambreaker-bots
+    restart: unless-stopped
+    volumes:
+      - C:\telegrambot:/app
+    ports:
+      - "8585:8585"   # Radarr/Sonarr webhooks -> http://localhost:8585/webhook
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr
+    environment:
+      - LOG_LEVEL=info
+      - LOG_HTML=false
+      - CAPTCHA_SOLVER=none
+      - TZ=Asia/Kolkata
+    ports:
+      - "8191:8191"
+    restart: unless-stopped

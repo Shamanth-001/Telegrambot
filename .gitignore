@@ -32,3 +32,7 @@ downloading/
 downloads/
 flaresolverr/
 aws_backup/
+
+# One-off Radarr/Sonarr/Prowlarr setup scripts (contain API keys)
+configure_*.py
+update_*.py
