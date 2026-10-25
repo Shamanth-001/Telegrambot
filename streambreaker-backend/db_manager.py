@@ -10,6 +10,11 @@ import sqlite3
 import threading
 import time
 
+from dotenv import load_dotenv
+
+# Load .env here too: callers (e.g. the bot) import this module before their own load_dotenv()
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
+
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'streambreaker.db')
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
