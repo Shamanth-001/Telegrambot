@@ -132,13 +132,16 @@ def card(item: dict, media_type: str | None = None) -> dict:
 @app.get("/api/health")
 async def health():
     # Touch the database so a free Supabase project counts as active (cron pings hit this)
+    import db_manager
     try:
-        from db_manager import DBManager
-        db_ok = await asyncio.to_thread(DBManager().ping)
+        db_ok = await asyncio.to_thread(db_manager.DBManager().ping)
     except Exception as e:
         logging.warning(f"DB ping failed: {e}")
         db_ok = False
-    return {"status": "ok", "service": "StreamBreaker API", "db": "ok" if db_ok else "error"}
+    return {"status": "ok", "service": "StreamBreaker API",
+            "db": "ok" if db_ok else "error",
+            "db_kind": "postgres" if db_manager.DATABASE_URL else "sqlite",
+            **({} if db_ok else {"db_error": db_manager.last_error[:300]})}
 
 
 @app.get("/api/movies")

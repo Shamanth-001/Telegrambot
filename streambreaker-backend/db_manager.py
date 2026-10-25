@@ -5,8 +5,10 @@ Uses Postgres when DATABASE_URL is set (Supabase — survives Render redeploys),
 otherwise a local SQLite file (development). One connection is shared per process.
 """
 import os
+import re
 import sqlite3
 import threading
+import time
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'streambreaker.db')
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
@@ -73,21 +75,56 @@ SCHEMA = {
 }
 
 
+last_error = ""  # shown on /api/health when the database can't be reached
+_next_retry = 0.0  # after a failure, wait before trying to connect again
+RETRY_SECONDS = 60
+
+
+def _redact(url: str) -> str:
+    """postgresql://user:secret@host/db -> postgresql://user:***@host/db (safe to log)."""
+    return re.sub(r"(://[^:/@]+):[^@]*@", r"\1:***@", url)
+
+
 class DBManager:
-    """Thin wrapper; every instance shares the process-wide connection."""
+    """Thin wrapper; every instance shares the process-wide connection.
+
+    A database that can't be reached never crashes the app: the error is logged, kept in
+    `last_error`, and the connection + migration are retried on the next call."""
 
     def __init__(self):
-        global _ready
+        self._ensure_ready()
+
+    def _ensure_ready(self) -> bool:
+        global _ready, last_error, _next_retry
+        if _ready:
+            return True
+        if time.monotonic() < _next_retry:
+            return False  # failed recently; don't stall every request on a connect timeout
         with _lock:
-            if not _ready:
+            if _ready:
+                return True
+            try:
                 self._migrate()
-                _ready = True
+                _ready, last_error = True, ""
+                print(f"[DB] Connected: {'Postgres ' + _redact(DATABASE_URL) if _is_pg() else 'SQLite ' + DB_PATH}")
+            except Exception as e:
+                last_error = f"{type(e).__name__}: {e}"
+                _next_retry = time.monotonic() + RETRY_SECONDS
+                hint = (" — use Supabase's *Session pooler* URI (the direct host is IPv6-only) and check the password"
+                        if _is_pg() else "")
+                print(f"[DB] Cannot use database {_redact(DATABASE_URL) or DB_PATH}: {last_error}{hint}")
+        return _ready
 
     # ------------------------------------------------------------------
     # Low-level helpers
     # ------------------------------------------------------------------
     def _run(self, sql: str, args=(), fetch: str | None = None):
         """Execute with reconnect-once on a dropped connection. fetch: None | 'one' | 'all'."""
+        if not self._ensure_ready():
+            raise RuntimeError(f"database unavailable: {last_error}")
+        return self._raw(sql, args, fetch)
+
+    def _raw(self, sql: str, args=(), fetch: str | None = None):
         global _conn
         if _is_pg():
             sql = sql.replace("?", "%s")
@@ -116,21 +153,21 @@ class DBManager:
         pg = _is_pg()
         for table, columns in SCHEMA.items():
             cols = ", ".join(f"{name} {pg_type if pg else lite_type}" for name, lite_type, pg_type in columns)
-            self._run(f"CREATE TABLE IF NOT EXISTS {table} ({cols})")
+            self._raw(f"CREATE TABLE IF NOT EXISTS {table} ({cols})")
             # Older databases: add any missing columns
             for name, lite_type, pg_type in columns:
                 if "PRIMARY KEY" in lite_type:
                     continue
                 if pg:
-                    self._run(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {name} {pg_type}")
+                    self._raw(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {name} {pg_type}")
                 else:
                     try:
-                        self._run(f"ALTER TABLE {table} ADD COLUMN {name} {lite_type}")
+                        self._raw(f"ALTER TABLE {table} ADD COLUMN {name} {lite_type}")
                     except sqlite3.OperationalError:
                         pass  # already exists
-        self._run("CREATE UNIQUE INDEX IF NOT EXISTS media_title_quality ON media (title, quality)")
-        self._run("CREATE INDEX IF NOT EXISTS media_tmdb ON media (tmdb_id, season, episode)")
-        self._run("CREATE INDEX IF NOT EXISTS requests_open ON requests (status, tmdb_id)")
+        self._raw("CREATE UNIQUE INDEX IF NOT EXISTS media_title_quality ON media (title, quality)")
+        self._raw("CREATE INDEX IF NOT EXISTS media_tmdb ON media (tmdb_id, season, episode)")
+        self._raw("CREATE INDEX IF NOT EXISTS requests_open ON requests (status, tmdb_id)")
 
     def ping(self) -> bool:
         """Cheap query used by /api/health (also keeps a free Supabase project active)."""
@@ -140,6 +177,8 @@ class DBManager:
     # Users
     # ------------------------------------------------------------------
     def track_user(self, user):
+        if not self._ensure_ready():
+            return  # analytics only; never block a search
         self._run('''
             INSERT INTO users (user_id, username, first_name, search_count)
             VALUES (?, ?, ?, 1)
@@ -163,6 +202,8 @@ class DBManager:
     def search_by_tmdb_id(self, tmdb_id, season=None, episode=None):
         """Library rows for a title. For series pass season (and episode) to narrow it down;
         season=None returns everything for that tmdb_id."""
+        if not self._ensure_ready():
+            return []  # library unavailable: callers fall back to magnet links
         sql = '''SELECT title, year, media_type, message_link, quality, size_bytes
                  FROM media WHERE tmdb_id = ?'''
         args = [tmdb_id]
@@ -177,7 +218,7 @@ class DBManager:
     def library_ids(self, tmdb_ids):
         """Which of these tmdb ids have at least one file in the library."""
         ids = [int(i) for i in tmdb_ids if i]
-        if not ids:
+        if not ids or not self._ensure_ready():
             return set()
         rows = self._run(f'SELECT DISTINCT tmdb_id FROM media WHERE tmdb_id IN ({",".join("?" * len(ids))})',
                          ids, fetch="all")
