@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { AlertTriangle, Check, Copy, Download, Magnet, Play, RefreshCw, Send } from 'lucide-react';
+import { AlertTriangle, Check, Copy, Download, FileDown, Magnet, Play, RefreshCw, Send } from 'lucide-react';
 import { api, watchPath, type Torrent, type TitleDetail } from '../lib/api';
 import { useAsync } from '../lib/hooks';
 import { copyText } from '../lib/toast';
@@ -61,6 +61,14 @@ function TorrentRow({ t }: { t: Torrent }) {
         >
           <Magnet className="h-4 w-4" strokeWidth={2.5} />
           Magnet
+        </a>
+        <a
+          href={`/api/torrent/${t.info_hash}.torrent?dn=${encodeURIComponent(t.title)}`}
+          title="Download the .torrent file"
+          className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-line px-3 text-sm font-semibold text-muted hover:border-ink hover:text-ink"
+        >
+          <FileDown className="h-4 w-4" />
+          <span className="hidden sm:inline">.torrent</span>
         </a>
         <button
           type="button"
@@ -296,7 +304,7 @@ export default function Downloads({ title }: { title: TitleDetail }) {
           </a>
 
           <p className="mt-4 text-xs leading-relaxed text-dim">
-            Magnet links open in a torrent app — try <span className="text-muted">qBittorrent</span> on desktop or{' '}
+            Magnet links and .torrent files both open in a torrent app — try <span className="text-muted">qBittorrent</span> on desktop or{' '}
             <span className="text-muted">LibreTorrent</span> on Android. More seeders = faster download.
           </p>
         </>

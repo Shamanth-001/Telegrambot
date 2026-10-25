@@ -391,14 +391,16 @@ color:var(--text);font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-ser
 h1{{font-size:18px;margin:0 0 4px;word-break:break-word}}p{{color:var(--muted);margin:0 0 20px;font-size:14px}}
 a.btn,button{{display:block;width:100%;text-align:center;border-radius:10px;padding:13px;font-weight:600;font-size:15px;
 cursor:pointer;text-decoration:none;border:0;margin-bottom:10px;font-family:inherit}}
-a.btn{{background:var(--accent);color:#0c0c0e}}button{{background:#24242a;color:var(--text);border:1px solid var(--line)}}
+a.btn{{background:var(--accent);color:#0c0c0e}}a.btn.alt{{background:#24242a;color:var(--text);border:1px solid var(--line)}}
+.notice{{background:#2a2410;color:#fbbf24;border-radius:10px;padding:10px 12px;font-size:13px;margin-bottom:12px}}button{{background:#24242a;color:var(--text);border:1px solid var(--line)}}
 textarea{{width:100%;height:84px;background:#0c0c0e;color:var(--muted);border:1px solid var(--line);border-radius:10px;
 padding:10px;font:12px/1.4 ui-monospace,monospace;resize:none;margin-top:6px}}
 .hint{{font-size:13px;color:var(--muted);margin-top:14px}}.hint b{{color:var(--text)}}
 </style></head><body><div class="card">
 <h1>{title}</h1>
 <p>Opens in your torrent app.</p>
-<a class="btn" href="{magnet}">Open magnet link</a>
+{notice}<a class="btn" href="{magnet}">Open magnet link</a>
+<a class="btn alt" href="/api/torrent/{hash}.torrent?dn={dn}">Download .torrent file</a>
 <button id="copy" type="button">Copy magnet link</button>
 <textarea readonly id="m">{magnet}</textarea>
 <div class="hint">No torrent app? Use <b>qBittorrent</b> (Windows/Mac/Linux) or <b>LibreTorrent</b> (Android).
@@ -415,9 +417,37 @@ async def magnet_page(info_hash: str, dn: str = ""):
     info_hash = info_hash.lower()
     if not re.fullmatch(r"[0-9a-f]{40}|[a-z2-7]{32}", info_hash):
         return HTMLResponse("Invalid link", status_code=400)
+    return _magnet_html(info_hash, dn)
+
+
+def _magnet_html(info_hash: str, dn: str, notice: str = "") -> str:
+    from urllib.parse import quote
     from torrent_scraper import build_magnet
     name = dn[:200] or info_hash
-    return _MAGNET_PAGE.format(title=html.escape(name), magnet=html.escape(build_magnet(info_hash, name)))
+    return _MAGNET_PAGE.format(
+        title=html.escape(name), magnet=html.escape(build_magnet(info_hash, name)),
+        hash=info_hash, dn=html.escape(quote(name)),
+        notice=f'<div class="notice">{html.escape(notice)}</div>' if notice else "")
+
+
+@app.get("/api/torrent/{info_hash}.torrent")
+async def torrent_file(info_hash: str, dn: str = ""):
+    """The .torrent file from a public cache; falls back to the magnet page when it isn't cached."""
+    from fastapi.responses import Response
+    from torrent_scraper import fetch_torrent_file, torrent_filename
+    info_hash = info_hash.lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", info_hash):
+        return HTMLResponse("Invalid link", status_code=400)
+    data = await fetch_torrent_file(info_hash)
+    if not data:
+        return HTMLResponse(_magnet_html(info_hash, dn, "No .torrent file is cached for this one — "
+                                                        "the magnet link below works the same way."))
+    from urllib.parse import quote
+    filename = torrent_filename(dn or info_hash)
+    return Response(data, media_type="application/x-bittorrent", headers={
+        "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
+        "Cache-Control": "public, max-age=86400",
+    })
 
 
 # ============================================================

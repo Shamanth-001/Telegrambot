@@ -32,6 +32,12 @@ from aiohttp import web
 from dotenv import load_dotenv
 from telethon import TelegramClient
 
+try:
+    import cryptg  # noqa: F401  — Telethon uses it automatically; uploads are several times faster
+    FAST_CRYPTO = True
+except ImportError:
+    FAST_CRYPTO = False
+
 from bot_utils import format_caption, format_size
 from db_manager import DBManager
 from radarr_client import RadarrClient
@@ -301,6 +307,7 @@ async def upload(file_path, media_type, tmdb_id, title, year, quality,
         caption = format_caption(full_title, year or "—", quality, file_size, rating=rating, genres=genres)
         client = movie_client if media_type == "movie" else (series_client or movie_client)
         print(f"[UPLOAD] Uploading: {full_title} ({format_size(file_size)})")
+        started = time.time()
         active_uploads[file_path] = {"title": full_title, "current": 0, "total": file_size, "speed": 0,
                                      "start_time": time.time(), "last_update": time.time()}
         try:
@@ -318,6 +325,8 @@ async def upload(file_path, media_type, tmdb_id, title, year, quality,
             if poster_path and os.path.isfile(poster_path):
                 os.remove(poster_path)
 
+    took = max(time.time() - started, 0.1)
+    print(f"[UPLOAD] Done in {took / 60:.1f} min ({file_size / took / 1024 ** 2:.1f} MB/s)")
     link = f"https://t.me/c/{str(CHANNEL_ID).replace('-100', '')}/{msg.id}"
     file_id = str(msg.document.id) if msg.document else ""
     db.mark_file_processed(file_path, full_title)
@@ -623,6 +632,8 @@ async def main():
         print(f"Missing env vars: {', '.join(missing)} — check your .env file")
         sys.exit(1)
 
+    if not FAST_CRYPTO:
+        print("[BOT] Tip: `pip install cryptg` makes Telegram uploads several times faster")
     print("[BOT] Connecting Telethon clients...")
     movie_client = TelegramClient("bot2_session", API_ID, API_HASH)
     await movie_client.start(bot_token=BOT2_TOKEN)

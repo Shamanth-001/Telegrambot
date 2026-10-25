@@ -8,16 +8,18 @@ Flow:
 
 Telegram buttons can't open magnet: URLs, so each link button opens
 /api/magnet/<hash> on the API, which hands the magnet to the torrent app.
-"Copy magnets" sends the raw links as tap-to-copy text.
+"Copy magnets" sends the raw links as tap-to-copy text; "Torrent files" sends .torrent files.
 """
+import asyncio
 import html
 import logging
 import os
+import re
 from urllib.parse import quote
 
 import aiohttp
 from dotenv import load_dotenv
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
 from telegram.constants import ChatAction, ParseMode
 from telegram.ext import (
     ApplicationBuilder, CallbackQueryHandler, CommandHandler, ContextTypes,
@@ -26,7 +28,7 @@ from telegram.ext import (
 
 from db_manager import DBManager
 from query_parser import parse_query
-from torrent_scraper import pick_best, search_torrents, short_magnet
+from torrent_scraper import fetch_torrent_file, pick_best, search_torrents, short_magnet, torrent_filename
 
 load_dotenv()
 
@@ -127,7 +129,7 @@ async def run_search(update: Update, context: ContextTypes.DEFAULT_TYPE, query: 
         return
 
     data = await tmdb("/search/multi", query=query, include_adult="false") or {}
-    hits = [h for h in data.get("results", []) if h.get("media_type") in ("movie", "tv")][:8]
+    hits = rank_hits(query, [h for h in data.get("results", []) if h.get("media_type") in ("movie", "tv")])
 
     if not hits:
         await update.effective_message.reply_text(
@@ -136,18 +138,94 @@ async def run_search(update: Update, context: ContextTypes.DEFAULT_TYPE, query: 
         )
         return
 
-    keyboard = []
-    for h in hits:
-        title = h.get("title") or h.get("name") or "Untitled"
-        year = year_of(h)
-        label = f"{TYPE_ICON[h['media_type']]} {title}" + (f" ({year})" if year else "")
-        keyboard.append([InlineKeyboardButton(label[:60], callback_data=f"t|{h['media_type']}|{h['id']}")])
+    chat_id = update.effective_chat.id
+    exact = [h for h in hits if is_exact(query, h) and not h.get("_demoted")]
+    # One clear match: go straight to it
+    if len(exact) == 1 or (exact and len(hits) == 1):
+        top = exact[0]
+        await show_title(chat_id, context, top["media_type"], top["id"])
+        others = [h for h in hits if h is not top][:5]
+        if others:
+            await context.bot.send_message(
+                chat_id, "Not the one you meant?", reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton(hit_label(h), callback_data=f"t|{h['media_type']}|{h['id']}")] for h in others]))
+        return
 
-    await update.effective_message.reply_text(
-        f"🔎 Results for <b>{esc(query)}</b> — pick one:",
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
+    # Several candidates: poster cards for the top few, the rest as buttons
+    genres = await genre_names()
+    for h in hits[:3]:
+        await send_result_card(chat_id, context, h, genres)
+    rest = hits[3:8]
+    if rest:
+        await context.bot.send_message(
+            chat_id, "More matches:", reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton(hit_label(h), callback_data=f"t|{h['media_type']}|{h['id']}")] for h in rest]))
+
+
+def _norm(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+
+
+def is_exact(query: str, hit: dict) -> bool:
+    q = _norm(query)
+    return q in (_norm(hit.get("title") or hit.get("name")), _norm(hit.get("original_title") or hit.get("original_name")))
+
+
+def rank_hits(query: str, hits: list[dict]) -> list[dict]:
+    """Drop poster-less / near-unknown entries (unless they match exactly), exact matches first, then popularity."""
+    with_posters = [h for h in hits if h.get("poster_path")]
+    useful = [h for h in with_posters
+              if is_exact(query, h) or (h.get("vote_count") or 0) >= 15 or (h.get("popularity") or 0) >= 3]
+    ranked = useful or with_posters or hits
+    ranked.sort(key=lambda h: (not is_exact(query, h), -(h.get("popularity") or 0)))
+    # Among several exact matches (e.g. a 2011 series and a 1990 film), keep only those that matter
+    exact = [h for h in ranked if is_exact(query, h)]
+    if len(exact) > 1 and (exact[0].get("popularity") or 0) > 8 * (exact[1].get("popularity") or 0.01):
+        ranked = [exact[0]] + [h for h in ranked if h is not exact[0] and not is_exact(query, h)] + exact[1:]
+        # demote the obscure duplicates so the clear winner counts as the single exact match
+        for h in exact[1:]:
+            h["_demoted"] = True
+    return ranked
+
+
+def hit_label(h: dict) -> str:
+    title = h.get("title") or h.get("name") or "Untitled"
+    year = year_of(h)
+    return (f"{TYPE_ICON.get(h['media_type'], '')} {title}" + (f" ({year})" if year else ""))[:60]
+
+
+_genre_cache: dict[int, str] = {}
+
+
+async def genre_names() -> dict[int, str]:
+    if not _genre_cache:
+        for kind in ("movie", "tv"):
+            data = await tmdb(f"/genre/{kind}/list") or {}
+            _genre_cache.update({g["id"]: g["name"] for g in data.get("genres", [])})
+    return _genre_cache
+
+
+async def send_result_card(chat_id, context, h: dict, genres: dict[int, str]):
+    title = h.get("title") or h.get("name") or "Untitled"
+    year = year_of(h)
+    kind = "Series" if h["media_type"] == "tv" else "Movie"
+    rating = h.get("vote_average") or 0
+    g = ", ".join(genres[i] for i in (h.get("genre_ids") or [])[:3] if i in genres)
+    overview = h.get("overview") or ""
+    if len(overview) > 180:
+        overview = overview[:180].rsplit(" ", 1)[0] + "…"
+    meta = " · ".join(x for x in (kind, f"⭐ {rating:.1f}" if rating else "", g) if x)
+    caption = (f"{TYPE_ICON[h['media_type']]} <b>{esc(title)}</b>" + (f" ({year})" if year else "")
+               + f"\n{esc(meta)}" + (f"\n\n<i>{esc(overview)}</i>" if overview else ""))
+    markup = InlineKeyboardMarkup([[InlineKeyboardButton(
+        "✅ Get links" if h["media_type"] == "movie" else "✅ Choose episodes",
+        callback_data=f"t|{h['media_type']}|{h['id']}")]])
+    try:
+        await context.bot.send_photo(chat_id, f"https://image.tmdb.org/t/p/w342{h['poster_path']}",
+                                     caption=caption[:1024], parse_mode=ParseMode.HTML, reply_markup=markup)
+    except Exception as e:  # poster fetch failed on Telegram's side
+        logging.warning(f"result card photo failed: {e}")
+        await context.bot.send_message(chat_id, caption, parse_mode=ParseMode.HTML, reply_markup=markup)
 
 
 async def run_episode_search(update: Update, context: ContextTypes.DEFAULT_TYPE, title: str, season: int, episode: int):
@@ -343,17 +421,40 @@ async def send_links(chat_id, context, media_type: str, tmdb_id: int, season: in
         lines.append("\n⚠️ <i>CAM = recorded in a cinema; picture and sound are poor.</i>")
     lines.append("\nTap a link to open it in your torrent app.")
 
-    extra = [InlineKeyboardButton("📋 Copy magnets", callback_data=f"m|{ref}")]
+    keyboard.append([InlineKeyboardButton("📋 Copy magnets", callback_data=f"m|{ref}"),
+                     InlineKeyboardButton("📄 Torrent files", callback_data=f"tf|{ref}")])
     page = site_link(f"/title/{media_type}/{tmdb_id}")
     if page and len(results) > len(best):
-        extra.append(InlineKeyboardButton(f"➕ All {len(results)} links", url=page))
-    keyboard.append(extra)
+        keyboard.append([InlineKeyboardButton(f"➕ All {len(results)} links on the website", url=page)])
     keyboard.append([request_btn])
     if back:
         keyboard.append(back)
 
     await message.edit_text("\n".join(lines), parse_mode=ParseMode.HTML,
                             reply_markup=InlineKeyboardMarkup(keyboard), disable_web_page_preview=True)
+
+
+async def send_torrent_files(chat_id, context, media_type, tmdb_id, season, episode):
+    """Send the .torrent file for each of the best links (from public caches)."""
+    label, results = await find_links(media_type, tmdb_id, season, episode)
+    best = pick_best(results, 5, max_size(season, episode))
+    if not best:
+        await context.bot.send_message(chat_id, "No links to send.")
+        return
+    await context.bot.send_chat_action(chat_id, ChatAction.UPLOAD_DOCUMENT)
+    files = await asyncio.gather(*[fetch_torrent_file(r.info_hash) for r in best])
+    missing = []
+    for i, (r, data) in enumerate(zip(best, files), 1):
+        if not data:
+            missing.append(str(i))
+            continue
+        await context.bot.send_document(
+            chat_id, InputFile(data, filename=torrent_filename(r.title)),
+            caption=f"{i}. {short_quality(r)} · {r.size} · 🌱 {r.seeders}")
+    if missing:
+        await context.bot.send_message(
+            chat_id, f"ℹ️ No .torrent file is cached for link {', '.join(missing)} — use its magnet button instead "
+                     "(works the same way).")
 
 
 async def send_magnet_text(chat_id, context, media_type, tmdb_id, season, episode):
@@ -398,6 +499,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif action == "m":                    # copy magnets as text
             await query.answer()
             await send_magnet_text(chat_id, context, parts[1], int(parts[2]), int(parts[3]), int(parts[4]))
+
+        elif action == "tf":                   # send .torrent files
+            await query.answer("Fetching .torrent files…")
+            await send_torrent_files(chat_id, context, parts[1], int(parts[2]), int(parts[3]), int(parts[4]))
 
         elif action == "r":                    # request to library
             await handle_request(query, context, parts[1], int(parts[2]), int(parts[3]), int(parts[4]))

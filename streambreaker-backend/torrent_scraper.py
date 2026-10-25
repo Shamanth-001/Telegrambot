@@ -533,3 +533,51 @@ def pick_best(results: list[TorrentResult], max_items: int = 5,
     if not picked:  # only CAM copies exist (fresh theatrical release)
         picked = results[:max_items]
     return picked[:max_items]
+
+
+# ============================================================
+# .torrent files (from public caches; magnets work for everything)
+# ============================================================
+
+TORRENT_CACHES = [
+    "https://itorrents.org/torrent/{HASH}.torrent",
+    "https://yts.gg/torrent/download/{HASH}",
+]
+_torrent_files: dict[str, tuple[float, bytes | None]] = {}
+
+
+def _looks_like_torrent(data: bytes) -> bool:
+    # A .torrent is a bencoded dict containing an "info" dictionary
+    return data[:1] == b"d" and b"4:info" in data[:200_000]
+
+
+async def fetch_torrent_file(info_hash: str) -> bytes | None:
+    """Download the .torrent for an info hash from a public cache, or None if none has it."""
+    info_hash = info_hash.lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", info_hash):
+        return None
+    hit = _torrent_files.get(info_hash)
+    if hit and time.time() - hit[0] < CACHE_TTL:
+        return hit[1]
+    data = None
+    async with aiohttp.ClientSession(headers=HEADERS) as session:
+        for template in TORRENT_CACHES:
+            url = template.replace("{HASH}", info_hash.upper())
+            try:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=15), ssl=False) as resp:
+                    if resp.status == 200:
+                        body = await resp.read()
+                        if len(body) < 10_000_000 and _looks_like_torrent(body):
+                            data = body
+                            break
+            except Exception as e:
+                logger.warning(f"Torrent cache {url}: {e}")
+    _torrent_files[info_hash] = (time.time(), data)
+    if len(_torrent_files) > 300:
+        _torrent_files.pop(next(iter(_torrent_files)))
+    return data
+
+
+def torrent_filename(name: str) -> str:
+    clean = re.sub(r'[\\/:*?"<>|]+', " ", name).strip()[:120] or "download"
+    return f"{clean}.torrent"
