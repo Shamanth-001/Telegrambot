@@ -19,7 +19,9 @@ from urllib.parse import quote
 
 import aiohttp
 from dotenv import load_dotenv
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
+from telegram import (
+    BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, InputMediaPhoto, Update,
+)
 from telegram.constants import ChatAction, ParseMode
 from telegram.ext import (
     ApplicationBuilder, CallbackQueryHandler, CommandHandler, ContextTypes,
@@ -100,16 +102,93 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await run_search(update, context, payload.replace("_", " "))
         return
 
-    buttons = []
+    buttons = [[InlineKeyboardButton("🔥 What's trending", callback_data="tr_new|all")]]
     if SITE_URL:
         buttons.append([InlineKeyboardButton("🌐 Browse the website", url=SITE_URL)])
     await update.message.reply_text(
         f"👋 Hi {esc(user.first_name)}!\n\n"
         "Send me the name of any <b>movie</b> or <b>series</b> and I'll find download links for it.\n\n"
-        "<i>Examples:</i> <code>Interstellar</code>, <code>Breaking Bad</code>, <code>Kalki 2898 AD</code>",
+        "<i>Examples:</i> <code>Interstellar</code>, <code>Breaking Bad</code>, <code>Kalki 2898 AD</code>, "
+        "<code>game of thrones s1e1</code>\n\n"
+        "🔥 /trending — what's popular this week",
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
     )
+
+
+# ============ /trending ============
+
+TRENDING_TABS = [("all", "🔥 All"), ("movie", "🎬 Movies"), ("tv", "📺 Series"), ("kn", "Kannada"), ("hi", "Hindi")]
+TRENDING_TITLES = {"all": "Trending this week", "movie": "Trending movies", "tv": "Trending series",
+                   "kn": "Popular Kannada movies", "hi": "Popular Hindi movies"}
+
+
+async def trending_items(tab: str) -> list[dict]:
+    if tab in ("all", "movie", "tv"):
+        data = await tmdb(f"/trending/{tab}/week") or {}
+        items = data.get("results", [])
+        if tab != "all":
+            for i in items:
+                i["media_type"] = tab
+    else:  # regional: popular recent films in that language
+        data = await tmdb("/discover/movie", with_original_language=tab, sort_by="popularity.desc",
+                          include_adult="false", **{"vote_count.gte": 3}) or {}
+        items = [{**i, "media_type": "movie"} for i in data.get("results", [])]
+    return [i for i in items if i.get("media_type") in ("movie", "tv") and i.get("poster_path")][:10]
+
+
+def trending_view(tab: str, items: list[dict]) -> tuple[str, str | None, InlineKeyboardMarkup]:
+    """(caption, image_url, keyboard) for one trending tab."""
+    lines = [f"<b>{TRENDING_TITLES[tab]}</b>\n"]
+    for n, i in enumerate(items, 1):
+        title = i.get("title") or i.get("name") or "Untitled"
+        year = year_of(i)
+        rating = i.get("vote_average") or 0
+        lines.append(f"{n}. {TYPE_ICON[i['media_type']]} {esc(title)}" + (f" ({year})" if year else "")
+                     + (f" · ⭐ {rating:.1f}" if rating else ""))
+    lines.append("\n<i>Tap a title for details and links.</i>")
+    tabs = [InlineKeyboardButton(("• " if key == tab else "") + label, callback_data=f"tr|{key}")
+            for key, label in TRENDING_TABS]
+    keyboard = [tabs[:3], tabs[3:]]
+    for n, i in enumerate(items, 1):
+        keyboard.append([InlineKeyboardButton(f"{n}. {hit_label(i)}"[:60],
+                                              callback_data=f"t|{i['media_type']}|{i['id']}")])
+    top = items[0] if items else {}
+    image = (f"https://image.tmdb.org/t/p/w780{top['backdrop_path']}" if top.get("backdrop_path")
+             else f"https://image.tmdb.org/t/p/w500{top['poster_path']}" if top.get("poster_path") else None)
+    return "\n".join(lines), image, InlineKeyboardMarkup(keyboard)
+
+
+async def trending(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    db.track_user(update.effective_user)
+    await context.bot.send_chat_action(update.effective_chat.id, ChatAction.UPLOAD_PHOTO)
+    items = await trending_items("all")
+    if not items:
+        await update.effective_message.reply_text("Couldn't load trending titles right now — try again in a minute.")
+        return
+    caption, image, markup = trending_view("all", items)
+    if image:
+        await update.effective_message.reply_photo(image, caption=caption[:1024], parse_mode=ParseMode.HTML,
+                                                   reply_markup=markup)
+    else:
+        await update.effective_message.reply_text(caption, parse_mode=ParseMode.HTML, reply_markup=markup)
+
+
+async def switch_trending_tab(query, tab: str):
+    if tab not in TRENDING_TITLES:
+        await query.answer()
+        return
+    items = await trending_items(tab)
+    if not items:
+        await query.answer("Nothing to show right now.", show_alert=True)
+        return
+    await query.answer()
+    caption, image, markup = trending_view(tab, items)
+    if query.message.photo and image:
+        await query.edit_message_media(InputMediaPhoto(image, caption=caption[:1024], parse_mode=ParseMode.HTML),
+                                       reply_markup=markup)
+    else:
+        await query.edit_message_text(caption, parse_mode=ParseMode.HTML, reply_markup=markup)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -481,6 +560,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer()
             await show_title(chat_id, context, parts[1], int(parts[2]))
 
+        elif action == "tr":                   # /trending tab switch
+            await switch_trending_tab(query, parts[1])
+
+        elif action == "tr_new":               # "What's trending" button on the welcome message
+            await query.answer()
+            await trending(update, context)
+
         elif action == "s":                    # picked a season
             await query.answer()
             await show_episode_picker(query, int(parts[1]), int(parts[2]))
@@ -570,7 +656,9 @@ async def admin_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = ("Send me a movie or series name to get download links.\n\n"
+    text = ("Send me a movie or series name to get download links.\n"
+            "For one episode: <code>game of thrones s1e1</code>\n\n"
+            "/trending — what's popular this week (movies, series, Kannada, Hindi)\n"
             "/recommend &lt;what you like&gt; — AI suggestions")
     if update.effective_user.id == ADMIN_ID:
         text += "\n\n<b>Admin</b>\n/stats — numbers\n/requests — pending requests"
@@ -607,9 +695,19 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
 
 # ============ Wiring ============
 
+async def set_command_menu(app):
+    """The list Telegram shows when users type "/"."""
+    await app.bot.set_my_commands([
+        BotCommand("trending", "What's trending this week"),
+        BotCommand("recommend", "AI suggestions, e.g. /recommend movies like Inception"),
+        BotCommand("help", "How to use the bot"),
+    ])
+
+
 def build_application():
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    application = ApplicationBuilder().token(BOT_TOKEN).post_init(set_command_menu).build()
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("trending", trending))
     application.add_handler(CommandHandler("help", help_cmd))
     application.add_handler(CommandHandler("recommend", recommend))
     application.add_handler(CommandHandler("stats", admin_stats))
