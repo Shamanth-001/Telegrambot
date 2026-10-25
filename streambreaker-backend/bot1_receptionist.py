@@ -752,12 +752,15 @@ async def admin_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def website(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = SITE_URL or "https://streambreaker.netlify.app"
-    await update.message.reply_text(
-        "🌐 <b>StreamBreaker website</b>\nBrowse movies and series, watch trailers, see where to stream, "
-        "and get download links.\n\nYou can also tap the <b>🌐 Website</b> button next to the message box.",
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Open the website", url=url)]]),
-    )
+    caption = ("🌐 <b>StreamBreaker website</b>\nBrowse movies and series, watch trailers, see where to stream, "
+               "and get download links.\n\nYou can also tap the <b>🌐 Website</b> button next to the message box.")
+    markup = InlineKeyboardMarkup([[InlineKeyboardButton("🌐 Open the website", url=url)]])
+    try:  # the site's banner (same image as its link previews)
+        await update.message.reply_photo(f"{url}/og-image.png", caption=caption, parse_mode=ParseMode.HTML,
+                                         reply_markup=markup)
+    except BadRequest as e:
+        logging.warning(f"/website banner failed: {e}")
+        await update.message.reply_text(caption, parse_mode=ParseMode.HTML, reply_markup=markup)
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
