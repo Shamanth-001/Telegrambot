@@ -6,7 +6,7 @@ cd ~/sb/streambreaker-backend || exit 1
 while true; do
     git -C ~/sb pull --ff-only -q 2>/dev/null || true
     echo "[$(date '+%F %T')] starting bot"
-    ~/sbenv/bin/python bot1_receptionist.py
+    python bot1_receptionist.py
     echo "[$(date '+%F %T')] bot exited with code $? — restarting in 15 s"
     sleep 15
 done

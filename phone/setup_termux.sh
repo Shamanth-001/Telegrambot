@@ -5,8 +5,12 @@
 set -e
 
 echo "==> Installing packages"
-pkg update -y
-pkg install -y python git openssh
+# full-upgrade first: installing python alone can leave libraries (e.g. libexpat) out of date
+export DEBIAN_FRONTEND=noninteractive
+APT_OPTS="-y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"
+apt-get update
+apt-get $APT_OPTS full-upgrade
+apt-get $APT_OPTS install python python-pip git openssh
 
 echo "==> Getting the code"
 if [ -d ~/sb/.git ]; then
@@ -16,12 +20,10 @@ else
 fi
 
 echo "==> Installing Python packages (pure-Python builds, no compiler needed)"
-# aiohttp and its helpers have optional C speedups; skip them so nothing needs compiling
-export AIOHTTP_NO_EXTENSIONS=1 MULTIDICT_NO_EXTENSIONS=1 YARL_NO_EXTENSIONS=1 \
-       FROZENLIST_NO_EXTENSIONS=1 PROPCACHE_NO_EXTENSIONS=1
-python -m venv ~/sbenv
-~/sbenv/bin/pip install --upgrade pip
-~/sbenv/bin/pip install -r ~/sb/phone/requirements-phone.txt
+# aiohttp and its helpers have optional C speedups; skip them so nothing needs compiling.
+# Termux's python can't create venvs (no ensurepip), so packages go into Termux's own Python.
+export AIOHTTP_NO_EXTENSIONS=1 MULTIDICT_NO_EXTENSIONS=1 YARL_NO_EXTENSIONS=1        FROZENLIST_NO_EXTENSIONS=1 PROPCACHE_NO_EXTENSIONS=1
+python -m pip install -r ~/sb/phone/requirements-phone.txt
 
 echo "==> Auto-start at boot (needs the Termux:Boot app, opened once)"
 mkdir -p ~/.termux/boot
