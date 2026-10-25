@@ -20,11 +20,12 @@ from urllib.parse import quote
 import aiohttp
 from dotenv import load_dotenv
 from telegram import (
-    BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, InputMediaPhoto, Update,
+    BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, InlineQueryResultArticle, InputFile,
+    InputMediaPhoto, InputTextMessageContent, LinkPreviewOptions, Update,
 )
 from telegram.constants import ChatAction, ParseMode
 from telegram.ext import (
-    ApplicationBuilder, CallbackQueryHandler, CommandHandler, ContextTypes,
+    ApplicationBuilder, CallbackQueryHandler, CommandHandler, ContextTypes, InlineQueryHandler,
     MessageHandler, filters,
 )
 
@@ -42,6 +43,7 @@ TMDB_KEY = os.getenv("TMDB_API_KEY")
 API_PUBLIC_URL = os.getenv("API_PUBLIC_URL", "https://telegrambot-p8yg.onrender.com").rstrip("/")
 # Public URL of the website; website buttons are hidden when unset.
 SITE_URL = os.getenv("SITE_URL", "").rstrip("/")
+BOT_USERNAME = os.getenv("BOT_USERNAME", "StreamBreakerBot")
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 
@@ -114,6 +116,56 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
     )
+
+
+# ============ Inline mode: @StreamBreakerBot <title> in any chat ============
+
+async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Share a title card into any chat. Empty query = this week's trending titles."""
+    q = (update.inline_query.query or "").strip()
+    if q:
+        data = await tmdb("/search/multi", query=q, include_adult="false") or {}
+        hits = rank_hits(q, [h for h in data.get("results", []) if h.get("media_type") in ("movie", "tv")])[:10]
+    else:
+        hits = await trending_items("all")
+    genres = await genre_names()
+
+    results = []
+    for h in hits:
+        media_type, tmdb_id = h["media_type"], h["id"]
+        title = h.get("title") or h.get("name") or "Untitled"
+        year = year_of(h)
+        rating = h.get("vote_average") or 0
+        g = ", ".join(genres[i] for i in (h.get("genre_ids") or [])[:3] if i in genres)
+        overview = h.get("overview") or ""
+        if len(overview) > 280:
+            overview = overview[:280].rsplit(" ", 1)[0] + "…"
+        poster = f"https://image.tmdb.org/t/p/w500{h['poster_path']}" if h.get("poster_path") else None
+        meta = " · ".join(x for x in ("Series" if media_type == "tv" else "Movie",
+                                      f"⭐ {rating:.1f}" if rating else "", g) if x)
+        text = (f"{TYPE_ICON[media_type]} <b>{esc(title)}</b>" + (f" ({year})" if year else "")
+                + f"\n{esc(meta)}" + (f"\n\n{esc(overview)}" if overview else ""))
+
+        buttons = [[InlineKeyboardButton("⬇️ Get links", url=f"https://t.me/{BOT_USERNAME}?start={media_type}_{tmdb_id}")]]
+        page = site_link(f"/title/{media_type}/{tmdb_id}")
+        if page:
+            buttons[0].append(InlineKeyboardButton("🌐 Website", url=page))
+
+        results.append(InlineQueryResultArticle(
+            id=f"{media_type}-{tmdb_id}",
+            title=title + (f" ({year})" if year else ""),
+            description=meta + (f"\n{overview[:90]}" if overview else ""),
+            thumbnail_url=f"https://image.tmdb.org/t/p/w154{h['poster_path']}" if h.get("poster_path") else None,
+            input_message_content=InputTextMessageContent(
+                text, parse_mode=ParseMode.HTML,
+                # The poster shows as a large preview above the card
+                link_preview_options=LinkPreviewOptions(url=poster, prefer_large_media=True, show_above_text=True)
+                if poster else LinkPreviewOptions(is_disabled=True),
+            ),
+            reply_markup=InlineKeyboardMarkup(buttons),
+        ))
+
+    await update.inline_query.answer(results, cache_time=300, is_personal=False)
 
 
 # ============ /trending ============
@@ -714,6 +766,7 @@ def build_application():
     application.add_handler(CommandHandler("requests", admin_requests))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(CallbackQueryHandler(button_handler))
+    application.add_handler(InlineQueryHandler(inline_query))
     application.add_error_handler(on_error)
     return application
 

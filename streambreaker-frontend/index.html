@@ -2,10 +2,29 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="theme-color" content="#0b0b0d" />
     <meta name="description" content="StreamBreaker — discover movies and series, watch trailers, see where to stream, and get download links." />
+
+    <!-- Installable web app -->
+    <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="StreamBreaker" />
+
+    <!-- Link previews (WhatsApp, Telegram, X, Discord…). Title pages get their own via an edge function. -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="StreamBreaker" />
+    <meta property="og:title" content="StreamBreaker" />
+    <meta property="og:description" content="Movies and series: trailers, where to watch, and download links." />
+    <meta property="og:image" content="https://streambreaker.netlify.app/og-image.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta name="twitter:card" content="summary_large_image" />
+
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link rel="preconnect" href="https://image.tmdb.org" />
