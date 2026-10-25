@@ -1,0 +1,5 @@
+# Bot-only dependencies for Android/Termux (no FastAPI, no compiled database driver)
+python-telegram-bot==21.5
+aiohttp==3.10.11
+python-dotenv==1.0.1
+pg8000==1.31.5

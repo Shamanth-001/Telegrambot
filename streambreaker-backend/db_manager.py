@@ -24,11 +24,34 @@ def _is_pg() -> bool:
 
 def _connect():
     if _is_pg():
-        import psycopg
+        try:
+            import psycopg
+        except ImportError:  # e.g. Android/Termux, where psycopg's binary wheel isn't available
+            return _connect_pg8000()
         # prepare_threshold=None: Supabase's pooler (pgbouncer) doesn't support prepared statements
         return psycopg.connect(DATABASE_URL, autocommit=True, prepare_threshold=None, connect_timeout=15)
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.isolation_level = None  # autocommit, same as Postgres
+    return conn
+
+
+def _connect_pg8000():
+    """Pure-Python Postgres driver fallback (same %s paramstyle as psycopg)."""
+    import ssl
+    from urllib.parse import unquote, urlparse
+    import pg8000.dbapi
+    u = urlparse(DATABASE_URL)
+    local = u.hostname in ("localhost", "127.0.0.1")
+    # Encrypted like psycopg's default (sslmode=prefer): TLS without verifying the certificate,
+    # since Supabase's pooler may use its own certificate authority
+    tls = ssl.create_default_context()
+    tls.check_hostname = False
+    tls.verify_mode = ssl.CERT_NONE
+    conn = pg8000.dbapi.connect(
+        user=unquote(u.username or ""), password=unquote(u.password or "") or None,
+        host=u.hostname, port=u.port or 5432, database=(u.path or "/postgres").lstrip("/") or "postgres",
+        ssl_context=None if local else tls, timeout=15)
+    conn.autocommit = True
     return conn
 
 
@@ -305,6 +328,15 @@ class DBManager:
 
 def _is_connection_error(e: Exception) -> bool:
     if _is_pg():
-        import psycopg
-        return isinstance(e, (psycopg.OperationalError, psycopg.InterfaceError))
+        try:
+            import psycopg
+            if isinstance(e, (psycopg.OperationalError, psycopg.InterfaceError)):
+                return True
+        except ImportError:
+            pass
+        try:
+            import pg8000
+            return isinstance(e, (pg8000.InterfaceError, ConnectionError, OSError))
+        except ImportError:
+            return False
     return isinstance(e, sqlite3.ProgrammingError) and "closed" in str(e)

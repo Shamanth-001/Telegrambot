@@ -27,6 +27,7 @@ from telegram.ext import (
 )
 
 from db_manager import DBManager
+from links import einthusan_url
 from query_parser import parse_query
 from torrent_scraper import fetch_torrent_file, pick_best, search_torrents, short_magnet, torrent_filename
 
@@ -278,8 +279,6 @@ async def show_title(chat_id: int, context: ContextTypes.DEFAULT_TYPE, media_typ
         + esc(" · ".join(m for m in meta if m)) + "\n\n"
         + esc(overview)
     )
-
-    from api_server import einthusan_url
 
     buttons = []
     page = site_link(f"/title/{media_type}/{tmdb_id}")
@@ -591,13 +590,8 @@ async def recommend(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prompt = (f"The user wants movie/series recommendations: '{ask}'.\n"
               "Suggest exactly 5 titles. For each: Title (Year) — one short reason. Plain text, no markdown.")
     try:
-        from api_server import ask_ai  # reuse the API's provider/key rotation
-
-        class _Req:
-            async def json(self):
-                return {"prompt": prompt}
-
-        text = (await ask_ai(_Req())).get("response", "")
+        import ai
+        text = await ai.ask(prompt)
     except Exception as e:
         logging.error(f"recommend failed: {e}")
         text = ""

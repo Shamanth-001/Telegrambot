@@ -10,7 +10,6 @@ Plus the AI recommender and the sync endpoints used by the local worker.
 """
 import asyncio
 import html
-import json as _json
 import logging
 import os
 import re
@@ -23,6 +22,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 
+from links import einthusan_url
 from torrent_scraper import search_torrents
 
 load_dotenv()
@@ -241,20 +241,6 @@ def _in_library(tmdb_id: int) -> bool:
         return False
 
 
-EINTHUSAN_LANGS = {"kn": "kannada", "ta": "tamil", "te": "telugu", "ml": "malayalam", "hi": "hindi",
-                   "bn": "bengali", "mr": "marathi", "pa": "punjabi"}
-
-
-def einthusan_url(media_type: str, data: dict) -> str:
-    """Search link on Einthusan (licensed South Asian streaming) for Indian-language films."""
-    lang = EINTHUSAN_LANGS.get(data.get("original_language", ""))
-    title = data.get("title") or data.get("original_title") or ""
-    if media_type != "movie" or not lang or not title:
-        return ""
-    from urllib.parse import quote_plus
-    return f"https://einthusan.tv/movie/results/?lang={lang}&query={quote_plus(title)}"
-
-
 @app.get("/api/movies/{tmdb_id}")
 async def get_title(tmdb_id: int, type: str = ""):
     order = ["tv", "movie"] if type == "tv" else ["movie", "tv"]
@@ -454,78 +440,14 @@ async def torrent_file(info_hash: str, dn: str = ""):
 # AI recommendations
 # ============================================================
 
-# Comma-separated keys, rotated round-robin to spread quota
-GEMINI_KEYS = [k.strip() for k in
-               (os.getenv("GEMINI_API_KEYS") or os.getenv("GEMINI_API_KEY") or "").split(",") if k.strip()]
-_key_index = 0
-
-
 @app.post("/api/ai")
-async def ask_ai(request: Request):
-    global _key_index
+async def ask_ai_endpoint(request: Request):
     try:
         data = await request.json()
     except Exception:
         return {"response": "Invalid request format."}
-    prompt = data.get("prompt", "")
-    if not prompt:
-        return {"response": "Empty prompt."}
-    prompt = f"{prompt}\n\nIMPORTANT: You must write the response strictly in English language."
-    session = await http()
-
-    # 1. NVIDIA (optional)
-    nvidia_key = os.getenv("NVIDIA_API_KEY", "").strip()
-    if nvidia_key:
-        try:
-            async with session.post(
-                "https://integrate.api.nvidia.com/v1/chat/completions",
-                json={"model": os.getenv("NVIDIA_MODEL", "nvidia/nemotron-3-ultra-550b-a55b"),
-                      "messages": [{"role": "user", "content": prompt}],
-                      "temperature": 1, "top_p": 0.95, "max_tokens": 4096},
-                headers={"Authorization": f"Bearer {nvidia_key}"},
-                timeout=aiohttp.ClientTimeout(total=60),
-            ) as resp:
-                if resp.status == 200:
-                    text = ((await resp.json()).get("choices") or [{}])[0].get("message", {}).get("content", "").strip()
-                    if text:
-                        return {"response": text}
-        except Exception as e:
-            logging.warning(f"[NVIDIA] {e}")
-
-    # 2. Gemini key pool
-    if not GEMINI_KEYS:
-        return {"response": "AI is not configured."}
-    last_error = ""
-    for model in ["gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-2.5-flash-lite", "gemini-flash-latest"]:
-        for _ in range(len(GEMINI_KEYS)):
-            key = GEMINI_KEYS[_key_index % len(GEMINI_KEYS)]
-            _key_index += 1
-            payload = {"contents": [{"parts": [{"text": prompt}]}],
-                       "generationConfig": {"maxOutputTokens": 500, "temperature": 0.9}}
-            # Thinking models: disable thinking so the answer fits the token budget
-            if any(v in model for v in ("2.5", "3.1", "3.5")):
-                payload["generationConfig"]["thinkingConfig"] = {"thinkingBudget": 0}
-            try:
-                async with session.post(
-                    f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}",
-                    json=payload,
-                ) as resp:
-                    result = _json.loads(await resp.text())
-            except Exception as e:
-                last_error = str(e)[:100]
-                continue
-            if "error" in result:
-                code = result["error"].get("code", 0)
-                last_error = "quota" if code == 429 else "model" if code == 404 else "error"
-                if code == 404:
-                    break
-                continue
-            text = ((result.get("candidates") or [{}])[0].get("content", {}).get("parts") or [{}])[0].get("text", "")
-            if text:
-                return {"response": text}
-    if last_error == "quota":
-        return {"response": "⏳ AI is resting. All keys hit their daily limit. Try again tomorrow!"}
-    return {"response": "AI is temporarily unavailable. Try again later!"}
+    import ai
+    return {"response": await ai.ask(data.get("prompt", ""))}
 
 
 # ============================================================
