@@ -24,6 +24,7 @@ from telegram import (
     InputMediaPhoto, InputTextMessageContent, LinkPreviewOptions, Update,
 )
 from telegram.constants import ChatAction, ParseMode
+from telegram.error import BadRequest
 from telegram.ext import (
     ApplicationBuilder, CallbackQueryHandler, CommandHandler, ContextTypes, InlineQueryHandler,
     MessageHandler, filters,
@@ -99,7 +100,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         payload = context.args[0]
         media_type, _, tmdb_id = payload.partition("_")
         if media_type in ("movie", "tv") and tmdb_id.isdigit():
-            await show_title(update.effective_chat.id, context, media_type, int(tmdb_id))
+            await open_title(context, update.effective_chat.id, media_type, int(tmdb_id))
             return
         await run_search(update, context, payload.replace("_", " "))
         return
@@ -204,7 +205,7 @@ def trending_view(tab: str, items: list[dict]) -> tuple[str, str | None, InlineK
     keyboard = [tabs[:3], tabs[3:]]
     for n, i in enumerate(items, 1):
         keyboard.append([InlineKeyboardButton(f"{n}. {hit_label(i)}"[:60],
-                                              callback_data=f"t|{i['media_type']}|{i['id']}")])
+                                              callback_data=f"t|{i['media_type']}|{i['id']}|tr.{tab}")])
     top = items[0] if items else {}
     image = (f"https://image.tmdb.org/t/p/w780{top['backdrop_path']}" if top.get("backdrop_path")
              else f"https://image.tmdb.org/t/p/w500{top['poster_path']}" if top.get("poster_path") else None)
@@ -226,7 +227,7 @@ async def trending(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text(caption, parse_mode=ParseMode.HTML, reply_markup=markup)
 
 
-async def switch_trending_tab(query, tab: str):
+async def switch_trending_tab(query, context, tab: str):
     if tab not in TRENDING_TITLES:
         await query.answer()
         return
@@ -236,11 +237,7 @@ async def switch_trending_tab(query, tab: str):
         return
     await query.answer()
     caption, image, markup = trending_view(tab, items)
-    if query.message.photo and image:
-        await query.edit_message_media(InputMediaPhoto(image, caption=caption[:1024], parse_mode=ParseMode.HTML),
-                                       reply_markup=markup)
-    else:
-        await query.edit_message_text(caption, parse_mode=ParseMode.HTML, reply_markup=markup)
+    await show_page(context, query.message.chat_id, image, caption, markup, query.message)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -253,6 +250,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def run_search(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str):
     await context.bot.send_chat_action(update.effective_chat.id, ChatAction.TYPING)
+    chat_id = update.effective_chat.id
 
     # "game of thrones s1e1" / "dark season 2" -> straight to that episode or season
     title, season, episode = parse_query(query)
@@ -270,28 +268,280 @@ async def run_search(update: Update, context: ContextTypes.DEFAULT_TYPE, query: 
         )
         return
 
-    chat_id = update.effective_chat.id
+    key = remember_list(context, query, hits[:10])
     exact = [h for h in hits if is_exact(query, h) and not h.get("_demoted")]
-    # One clear match: go straight to it
+    # One clear match: open it, with a way back to the other results
     if len(exact) == 1 or (exact and len(hits) == 1):
         top = exact[0]
-        await show_title(chat_id, context, top["media_type"], top["id"])
-        others = [h for h in hits if h is not top][:5]
-        if others:
-            await context.bot.send_message(
-                chat_id, "Not the one you meant?", reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton(hit_label(h), callback_data=f"t|{h['media_type']}|{h['id']}")] for h in others]))
+        await open_title(context, chat_id, top["media_type"], top["id"], back=f"q.{key}" if len(hits) > 1 else "")
+        return
+    caption, image, markup = list_page(context, key)
+    await show_page(context, chat_id, image, caption, markup)
+
+
+# ============ Pages: everything happens inside one message ============
+#
+# Lists, title pages, season pickers and link lists are "pages" drawn into a single photo
+# message; tapping a button edits that message in place. Each page knows where "« Back" goes:
+#   back token ""        -> no back button
+#   back token "tr.all"  -> /trending tab
+#   back token "q.<key>" -> a remembered search result list
+
+FALLBACK_IMAGE = "https://streambreaker.netlify.app/og-image.png"
+
+
+async def show_page(context, chat_id: int, image: str | None, caption: str, markup, message=None):
+    """Draw a page into `message` (a photo message) or send it as a new photo message."""
+    image, caption = image or FALLBACK_IMAGE, caption[:1024]
+    if message is not None and message.photo:
+        try:
+            return await message.edit_media(InputMediaPhoto(image, caption=caption, parse_mode=ParseMode.HTML),
+                                             reply_markup=markup)
+        except BadRequest as e:
+            if "not modified" in str(e).lower():
+                return message
+            logging.warning(f"edit_media failed ({e}); sending a new message")
+    elif message is not None:
+        try:  # text messages can't become photos: replace them
+            await message.delete()
+        except Exception:
+            pass
+    try:
+        return await context.bot.send_photo(chat_id, image, caption=caption, parse_mode=ParseMode.HTML,
+                                            reply_markup=markup)
+    except BadRequest as e:  # e.g. Telegram couldn't fetch the image
+        logging.warning(f"send_photo failed ({e}); using the fallback image")
+        return await context.bot.send_photo(chat_id, FALLBACK_IMAGE, caption=caption, parse_mode=ParseMode.HTML,
+                                            reply_markup=markup)
+
+
+async def show_loading(message, text: str = "🔎 Searching for links…"):
+    """Quick feedback while a slow page loads."""
+    if message is not None and message.photo:
+        try:
+            await message.edit_caption(text, reply_markup=None)
+        except Exception:
+            pass
+
+
+def back_button(back: str):
+    if back.startswith("tr."):
+        return InlineKeyboardButton("« Back to trending", callback_data=f"tr|{back[3:]}")
+    if back.startswith("q."):
+        return InlineKeyboardButton("« All results", callback_data=f"q|{back[2:]}")
+    return None
+
+
+def tmdb_image(item: dict, wide: bool = False) -> str | None:
+    if wide and item.get("backdrop_path"):
+        return f"https://image.tmdb.org/t/p/w780{item['backdrop_path']}"
+    if item.get("poster_path"):
+        return f"https://image.tmdb.org/t/p/w500{item['poster_path']}"
+    return None
+
+
+# ---- search result lists ----
+
+def remember_list(context, query: str, hits: list[dict]) -> str:
+    """Keep a search result list so "« All results" can redraw it. Returns its short key."""
+    lists = context.chat_data.setdefault("lists", {})
+    n = context.chat_data.get("list_seq", 0) + 1
+    context.chat_data["list_seq"] = n
+    key = format(n, "x")
+    lists[key] = {"q": query, "hits": [
+        {k: h.get(k) for k in ("id", "media_type", "title", "name", "release_date", "first_air_date",
+                               "vote_average", "poster_path", "backdrop_path")} for h in hits]}
+    while len(lists) > 15:  # keep memory small
+        lists.pop(next(iter(lists)))
+    return key
+
+
+def list_page(context, key: str):
+    saved = context.chat_data.get("lists", {}).get(key)
+    if not saved:
+        return None
+    hits = saved["hits"]
+    lines = [f"🔎 <b>Results for “{esc(saved['q'])}”</b>\n"]
+    keyboard = []
+    for n, h in enumerate(hits, 1):
+        rating = h.get("vote_average") or 0
+        lines.append(f"{n}. {hit_label(h)}" + (f" · ⭐ {rating:.1f}" if rating else ""))
+        keyboard.append([InlineKeyboardButton(f"{n}. {hit_label(h)}"[:60],
+                                              callback_data=f"t|{h['media_type']}|{h['id']}|q.{key}")])
+    lines.append("\n<i>Tap a title to open it.</i>")
+    return "\n".join(lines), tmdb_image(hits[0], wide=True), InlineKeyboardMarkup(keyboard)
+
+
+async def run_episode_search(update: Update, context: ContextTypes.DEFAULT_TYPE, title: str, season: int, episode: int):
+    chat_id = update.effective_chat.id
+    data = await tmdb("/search/tv", query=title, include_adult="false") or {}
+    hits = [{**h, "media_type": "tv"} for h in data.get("results", [])[:8]]
+    tag = f"S{season:02d}" + (f"E{episode:02d}" if episode else "")
+    if not hits:
+        await update.effective_message.reply_text(
+            f"😕 No series called <b>{esc(title)}</b> found. Check the spelling.", parse_mode=ParseMode.HTML)
         return
 
-    # Several candidates: poster cards for the top few, the rest as buttons
-    genres = await genre_names()
-    for h in hits[:3]:
-        await send_result_card(chat_id, context, h, genres)
-    rest = hits[3:8]
-    if rest:
-        await context.bot.send_message(
-            chat_id, "More matches:", reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton(hit_label(h), callback_data=f"t|{h['media_type']}|{h['id']}")] for h in rest]))
+    # Confident match: straight to the links
+    top = hits[0]
+    if (top.get("name") or "").lower() == title.lower() or len(hits) == 1:
+        await open_links(context, chat_id, "tv", top["id"], season, episode)
+        return
+
+    key = remember_list(context, f"{title} {tag}", hits)
+    keyboard = [[InlineKeyboardButton(f"{hit_label(h)} · {tag}"[:60],
+                                      callback_data=f"l|tv|{h['id']}|{season}|{episode}|q.{key}")] for h in hits]
+    await show_page(context, chat_id, tmdb_image(top, wide=True),
+                    f"🔎 Which series do you want <b>{tag}</b> of?", InlineKeyboardMarkup(keyboard))
+
+
+# ---- title page ----
+
+async def open_title(context, chat_id: int, media_type: str, tmdb_id: int, back: str = "", message=None):
+    data = await tmdb(f"/{media_type}/{tmdb_id}")
+    if not data:
+        await context.bot.send_message(chat_id, "❌ Couldn't load that title. Try searching by name.")
+        return
+
+    title = data.get("title") or data.get("name") or "Untitled"
+    year = year_of(data)
+    rating = data.get("vote_average") or 0
+    genres = ", ".join(g["name"] for g in data.get("genres", [])[:3])
+    overview = data.get("overview") or ""
+    if len(overview) > 450:
+        overview = overview[:450].rsplit(" ", 1)[0] + "…"
+    meta = [f"⭐ {rating:.1f}" if rating else "", genres]
+    if media_type == "movie" and data.get("runtime"):
+        meta.append(f"{data['runtime'] // 60}h {data['runtime'] % 60}m")
+    if media_type == "tv":
+        meta.append(f"{data.get('number_of_seasons', 0)} seasons")
+    caption = (f"{TYPE_ICON[media_type]} <b>{esc(title)}</b>" + (f" ({year})" if year else "") + "\n"
+               + esc(" · ".join(m for m in meta if m)) + "\n\n" + esc(overview))
+
+    keyboard = []
+    if media_type == "movie":
+        keyboard.append([InlineKeyboardButton("⬇️ Download links", callback_data=f"l|movie|{tmdb_id}|0|0|{back}")])
+    else:
+        seasons = [s for s in data.get("seasons", []) if s.get("season_number", 0) > 0 and s.get("episode_count")]
+        buttons = [InlineKeyboardButton(f"S{s['season_number']:02d}",
+                                        callback_data=f"s|{tmdb_id}|{s['season_number']}|{back}") for s in seasons]
+        keyboard += [buttons[i:i + 5] for i in range(0, len(buttons), 5)]
+        caption += "\n\n<i>Choose a season:</i>" if seasons else "\n\n<i>No seasons listed yet.</i>"
+    extra = []
+    page = site_link(f"/title/{media_type}/{tmdb_id}")
+    if page:
+        extra.append(InlineKeyboardButton("🌐 Website", url=page))
+    einthusan = einthusan_url(media_type, data)
+    if einthusan:
+        extra.append(InlineKeyboardButton("▶️ Einthusan", url=einthusan))
+    if extra:
+        keyboard.append(extra)
+    b = back_button(back)
+    if b:
+        keyboard.append([b])
+
+    await show_page(context, chat_id, tmdb_image(data), caption, InlineKeyboardMarkup(keyboard), message)
+
+
+# ---- season → episodes ----
+
+async def open_episodes(context, chat_id: int, tmdb_id: int, season: int, back: str = "", message=None):
+    show = await tmdb(f"/tv/{tmdb_id}") or {}
+    data = await tmdb(f"/tv/{tmdb_id}/season/{season}") or {}
+    episodes = [e["episode_number"] for e in data.get("episodes", []) if e.get("episode_number")]
+    keyboard = [[InlineKeyboardButton(f"📦 Full season {season}", callback_data=f"l|tv|{tmdb_id}|{season}|0|{back}")]]
+    row = []
+    for ep in episodes[:60]:
+        row.append(InlineKeyboardButton(f"E{ep:02d}", callback_data=f"l|tv|{tmdb_id}|{season}|{ep}|{back}"))
+        if len(row) == 6:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    keyboard.append([InlineKeyboardButton("« Seasons", callback_data=f"t|tv|{tmdb_id}|{back}")])
+    caption = (f"📺 <b>{esc(show.get('name') or 'Series')}</b> — Season {season}\n"
+               f"{len(episodes)} episodes. Pick one, or the full season.")
+    image = tmdb_image(data) or tmdb_image(show)
+    await show_page(context, chat_id, image, caption, InlineKeyboardMarkup(keyboard), message)
+
+
+# ============ Links ============
+
+async def find_links(media_type: str, tmdb_id: int, season: int = 0, episode: int = 0):
+    data = await tmdb(f"/{media_type}/{tmdb_id}", append_to_response="external_ids") or {}
+    title = data.get("title") or data.get("name") or ""
+    year = year_of(data)
+    imdb_id = (data.get("external_ids") or {}).get("imdb_id") or ""
+    results = await search_torrents(title, media_type, year=year, imdb_id=imdb_id, season=season,
+                                    episode=episode, language=data.get("original_language") or "") if title else []
+    label = title + (f" ({year})" if media_type == "movie" and year else "")
+    if season:
+        label += f" S{season:02d}" + (f"E{episode:02d}" if episode else "")
+    return label, results, tmdb_image(data)
+
+
+def max_size(season: int, episode: int) -> int:
+    """Upper size limit for the short list: movie 25 GB, episode 10 GB, season pack 80 GB."""
+    gb = 1024 ** 3
+    return 10 * gb if episode else 80 * gb if season else 25 * gb
+
+
+def short_quality(r) -> str:
+    return r.quality if r.quality != "Unknown" else (r.rip or "Other")
+
+
+def describe(r) -> str:
+    bits = [r.quality if r.quality != "Unknown" else "", "/".join(r.languages), r.rip, r.codec, r.size]
+    return " · ".join(b for b in bits if b and b != "Unknown")
+
+
+async def open_links(context, chat_id: int, media_type: str, tmdb_id: int, season: int = 0, episode: int = 0,
+                     back: str = "", message=None):
+    """The links page for a movie / season / episode."""
+    await show_loading(message)
+    label, results, image = await find_links(media_type, tmdb_id, season, episode)
+    best = pick_best(results, 5, max_size(season, episode))
+    ref = f"{media_type}|{tmdb_id}|{season}|{episode}"
+
+    # Files already in the Telegram library are sent as files (Option B pipeline)
+    if media_type == "movie":
+        await send_library_files(chat_id, context, db.search_by_tmdb_id(tmdb_id))
+    elif season:
+        await send_library_files(chat_id, context, db.search_by_tmdb_id(tmdb_id, season, episode))
+
+    keyboard = []
+    if best:
+        def build(release_chars: int) -> str:
+            lines = [f"⬇️ <b>{esc(label)}</b>\n"]
+            for i, r in enumerate(best, 1):
+                lines.append(f"<b>{i}.</b> {esc(describe(r))} · 🌱 {r.seeders}"
+                             + (f"\n<i>{esc(r.title[:release_chars])}</i>" if release_chars else ""))
+            if any(r.is_cam for r in best):
+                lines.append("\n⚠️ <i>CAM = recorded in a cinema; poor picture and sound.</i>")
+            lines.append("\nTap a link to open it in your torrent app.")
+            return "\n".join(lines)
+        caption = build(60)
+        if len(caption) > 1024:  # photo captions max out at 1024 characters
+            caption = build(0)
+        for i, r in enumerate(best, 1):
+            keyboard.append([InlineKeyboardButton(f"{i}. {short_quality(r)} · {r.size} · 🌱{r.seeders}"[:60],
+                                                  url=magnet_page(r.info_hash, r.title))])
+        keyboard.append([InlineKeyboardButton("📋 Copy magnets", callback_data=f"m|{ref}"),
+                         InlineKeyboardButton("📄 Torrent files", callback_data=f"tf|{ref}")])
+        page = site_link(f"/title/{media_type}/{tmdb_id}")
+        if page and len(results) > len(best):
+            keyboard.append([InlineKeyboardButton(f"➕ All {len(results)} links on the website", url=page)])
+    else:
+        caption = (f"😕 No download links found for <b>{esc(label)}</b> right now.\n"
+                   "Tap <b>Send me the file here</b> and we'll try to get it for you.")
+    keyboard.append([InlineKeyboardButton("📥 Send me the file here", callback_data=f"r|{ref}")])
+
+    if media_type == "movie":
+        keyboard.append([InlineKeyboardButton("« Back", callback_data=f"t|movie|{tmdb_id}|{back}")])
+    else:
+        keyboard.append([InlineKeyboardButton("« Episodes", callback_data=f"s|{tmdb_id}|{season}|{back}")])
+
+    await show_page(context, chat_id, image, caption, InlineKeyboardMarkup(keyboard), message)
 
 
 def _norm(text: str) -> str:
@@ -337,106 +587,6 @@ async def genre_names() -> dict[int, str]:
     return _genre_cache
 
 
-async def send_result_card(chat_id, context, h: dict, genres: dict[int, str]):
-    title = h.get("title") or h.get("name") or "Untitled"
-    year = year_of(h)
-    kind = "Series" if h["media_type"] == "tv" else "Movie"
-    rating = h.get("vote_average") or 0
-    g = ", ".join(genres[i] for i in (h.get("genre_ids") or [])[:3] if i in genres)
-    overview = h.get("overview") or ""
-    if len(overview) > 180:
-        overview = overview[:180].rsplit(" ", 1)[0] + "…"
-    meta = " · ".join(x for x in (kind, f"⭐ {rating:.1f}" if rating else "", g) if x)
-    caption = (f"{TYPE_ICON[h['media_type']]} <b>{esc(title)}</b>" + (f" ({year})" if year else "")
-               + f"\n{esc(meta)}" + (f"\n\n<i>{esc(overview)}</i>" if overview else ""))
-    markup = InlineKeyboardMarkup([[InlineKeyboardButton(
-        "✅ Get links" if h["media_type"] == "movie" else "✅ Choose episodes",
-        callback_data=f"t|{h['media_type']}|{h['id']}")]])
-    try:
-        await context.bot.send_photo(chat_id, f"https://image.tmdb.org/t/p/w342{h['poster_path']}",
-                                     caption=caption[:1024], parse_mode=ParseMode.HTML, reply_markup=markup)
-    except Exception as e:  # poster fetch failed on Telegram's side
-        logging.warning(f"result card photo failed: {e}")
-        await context.bot.send_message(chat_id, caption, parse_mode=ParseMode.HTML, reply_markup=markup)
-
-
-async def run_episode_search(update: Update, context: ContextTypes.DEFAULT_TYPE, title: str, season: int, episode: int):
-    data = await tmdb("/search/tv", query=title, include_adult="false") or {}
-    hits = data.get("results", [])[:6]
-    tag = f"S{season:02d}" + (f"E{episode:02d}" if episode else "")
-    if not hits:
-        await update.effective_message.reply_text(
-            f"😕 No series called <b>{esc(title)}</b> found. Check the spelling.", parse_mode=ParseMode.HTML)
-        return
-
-    # Confident match: skip the picker
-    top = hits[0]
-    if (top.get("name") or "").lower() == title.lower() or len(hits) == 1:
-        await send_links(update.effective_chat.id, context, "tv", top["id"], season, episode)
-        return
-
-    keyboard = [[InlineKeyboardButton(
-        f"📺 {h.get('name')}" + (f" ({year_of(h)})" if year_of(h) else "") + f" · {tag}",
-        callback_data=f"l|tv|{h['id']}|{season}|{episode}")] for h in hits]
-    await update.effective_message.reply_text(
-        f"🔎 Which series do you want <b>{tag}</b> of?", parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(keyboard))
-
-
-# ============ Title page ============
-
-async def show_title(chat_id: int, context: ContextTypes.DEFAULT_TYPE, media_type: str, tmdb_id: int):
-    await context.bot.send_chat_action(chat_id, ChatAction.TYPING)
-    data = await tmdb(f"/{media_type}/{tmdb_id}")
-    if not data:
-        await context.bot.send_message(chat_id, "❌ Couldn't load that title. Try searching by name.")
-        return
-
-    title = data.get("title") or data.get("name") or "Untitled"
-    year = year_of(data)
-    rating = data.get("vote_average") or 0
-    genres = ", ".join(g["name"] for g in data.get("genres", [])[:3])
-    overview = data.get("overview") or ""
-    if len(overview) > 400:
-        overview = overview[:400].rsplit(" ", 1)[0] + "…"
-
-    meta = [f"⭐ {rating:.1f}" if rating else "", genres]
-    if media_type == "movie" and data.get("runtime"):
-        meta.append(f"{data['runtime'] // 60}h {data['runtime'] % 60}m")
-    if media_type == "tv":
-        meta.append(f"{data.get('number_of_seasons', 0)} seasons")
-    caption = (
-        f"{TYPE_ICON[media_type]} <b>{esc(title)}</b>" + (f" ({year})" if year else "") + "\n"
-        + esc(" · ".join(m for m in meta if m)) + "\n\n"
-        + esc(overview)
-    )
-
-    buttons = []
-    page = site_link(f"/title/{media_type}/{tmdb_id}")
-    if page:
-        buttons.append([InlineKeyboardButton("🌐 Open on website", url=page)])
-    einthusan = einthusan_url(media_type, data)
-    if einthusan:
-        buttons.append([InlineKeyboardButton("▶️ Stream on Einthusan", url=einthusan)])
-    markup = InlineKeyboardMarkup(buttons) if buttons else None
-
-    poster = data.get("poster_path")
-    if poster:
-        await context.bot.send_photo(chat_id, f"https://image.tmdb.org/t/p/w500{poster}",
-                                     caption=caption[:1024], parse_mode=ParseMode.HTML, reply_markup=markup)
-    else:
-        await context.bot.send_message(chat_id, caption, parse_mode=ParseMode.HTML, reply_markup=markup)
-
-    # Already in the Telegram library? Send the file itself (series: per episode, in send_links)
-    if media_type == "movie":
-        await send_library_files(chat_id, context, db.search_by_tmdb_id(tmdb_id))
-
-    if media_type == "movie":
-        await send_links(chat_id, context, "movie", tmdb_id)
-    else:
-        await send_season_picker(chat_id, context, tmdb_id, data)
-
-
 async def send_library_files(chat_id, context, rows, limit: int = 30):
     """Copy already-uploaded files from the storage channel into the chat."""
     for row in rows[:limit]:
@@ -448,125 +598,10 @@ async def send_library_files(chat_id, context, rows, limit: int = 30):
             logging.warning(f"copy_message failed for {link}: {e}")
 
 
-async def send_season_picker(chat_id, context, tmdb_id: int, data: dict, message=None):
-    seasons = [s for s in data.get("seasons", []) if s.get("season_number", 0) > 0 and s.get("episode_count")]
-    if not seasons:
-        await context.bot.send_message(chat_id, "No seasons listed for this series yet.")
-        return
-    buttons = [InlineKeyboardButton(f"S{s['season_number']:02d}", callback_data=f"s|{tmdb_id}|{s['season_number']}")
-               for s in seasons]
-    keyboard = [buttons[i:i + 5] for i in range(0, len(buttons), 5)]
-    text = "📺 <b>Choose a season</b>"
-    if message:
-        await message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
-    else:
-        await context.bot.send_message(chat_id, text, parse_mode=ParseMode.HTML,
-                                       reply_markup=InlineKeyboardMarkup(keyboard))
-
-
-async def show_episode_picker(query, tmdb_id: int, season: int):
-    data = await tmdb(f"/tv/{tmdb_id}/season/{season}") or {}
-    episodes = [e["episode_number"] for e in data.get("episodes", []) if e.get("episode_number")]
-    keyboard = [[InlineKeyboardButton(f"📦 Full season {season}", callback_data=f"l|tv|{tmdb_id}|{season}|0")]]
-    row = []
-    for ep in episodes[:60]:
-        row.append(InlineKeyboardButton(f"E{ep:02d}", callback_data=f"l|tv|{tmdb_id}|{season}|{ep}"))
-        if len(row) == 6:
-            keyboard.append(row)
-            row = []
-    if row:
-        keyboard.append(row)
-    keyboard.append([InlineKeyboardButton("« Seasons", callback_data=f"ss|{tmdb_id}")])
-    await query.edit_message_text(
-        f"📺 <b>Season {season}</b> — pick an episode or the full season:",
-        parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard),
-    )
-
-
-# ============ Links ============
-
-async def find_links(media_type: str, tmdb_id: int, season: int = 0, episode: int = 0):
-    data = await tmdb(f"/{media_type}/{tmdb_id}", append_to_response="external_ids") or {}
-    title = data.get("title") or data.get("name") or ""
-    year = year_of(data)
-    imdb_id = (data.get("external_ids") or {}).get("imdb_id") or ""
-    results = await search_torrents(title, media_type, year=year, imdb_id=imdb_id, season=season,
-                                    episode=episode, language=data.get("original_language") or "") if title else []
-    label = title + (f" ({year})" if media_type == "movie" and year else "")
-    if season:
-        label += f" S{season:02d}" + (f"E{episode:02d}" if episode else "")
-    return label, results
-
-
-def max_size(season: int, episode: int) -> int:
-    """Upper size limit for the short list: movie 25 GB, episode 10 GB, season pack 80 GB."""
-    gb = 1024 ** 3
-    return 10 * gb if episode else 80 * gb if season else 25 * gb
-
-
-def short_quality(r) -> str:
-    return r.quality if r.quality != "Unknown" else (r.rip or "Other")
-
-
-def describe(r) -> str:
-    bits = [r.quality if r.quality != "Unknown" else "", "/".join(r.languages), r.rip, r.codec, r.size]
-    return " · ".join(b for b in bits if b and b != "Unknown")
-
-
-async def send_links(chat_id, context, media_type: str, tmdb_id: int, season: int = 0, episode: int = 0,
-                     message=None):
-    """Send (or edit `message` into) the best links for a title."""
-    if message:
-        await message.edit_text("🔎 Searching for links…")
-    else:
-        message = await context.bot.send_message(chat_id, "🔎 Searching for links…")
-
-    label, results = await find_links(media_type, tmdb_id, season, episode)
-    best = pick_best(results, 5, max_size(season, episode))
-    ref = f"{media_type}|{tmdb_id}|{season}|{episode}"
-    back = [InlineKeyboardButton("« Episodes", callback_data=f"s|{tmdb_id}|{season}")] if season else []
-    request_btn = InlineKeyboardButton("📥 Send me the file here", callback_data=f"r|{ref}")
-
-    if media_type == "tv" and season:
-        await send_library_files(chat_id, context, db.search_by_tmdb_id(tmdb_id, season, episode))
-
-    if not best:
-        keyboard = [[request_btn]]
-        if back:
-            keyboard.append(back)
-        await message.edit_text(
-            f"😕 No download links found for <b>{esc(label)}</b> right now.\n"
-            "Tap <b>Send me the file here</b> and we'll try to get it for you.",
-            parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard),
-        )
-        return
-
-    lines = [f"⬇️ <b>{esc(label)}</b>\n"]
-    keyboard = []
-    for i, r in enumerate(best, 1):
-        lines.append(f"<b>{i}.</b> {esc(describe(r))} · 🌱 {r.seeders}\n<i>{esc(r.title[:90])}</i>")
-        keyboard.append([InlineKeyboardButton(f"{i}. {short_quality(r)} · {r.size} · 🌱{r.seeders}"[:60],
-                                              url=magnet_page(r.info_hash, r.title))])
-    if any(r.is_cam for r in best):
-        lines.append("\n⚠️ <i>CAM = recorded in a cinema; picture and sound are poor.</i>")
-    lines.append("\nTap a link to open it in your torrent app.")
-
-    keyboard.append([InlineKeyboardButton("📋 Copy magnets", callback_data=f"m|{ref}"),
-                     InlineKeyboardButton("📄 Torrent files", callback_data=f"tf|{ref}")])
-    page = site_link(f"/title/{media_type}/{tmdb_id}")
-    if page and len(results) > len(best):
-        keyboard.append([InlineKeyboardButton(f"➕ All {len(results)} links on the website", url=page)])
-    keyboard.append([request_btn])
-    if back:
-        keyboard.append(back)
-
-    await message.edit_text("\n".join(lines), parse_mode=ParseMode.HTML,
-                            reply_markup=InlineKeyboardMarkup(keyboard), disable_web_page_preview=True)
-
 
 async def send_torrent_files(chat_id, context, media_type, tmdb_id, season, episode):
     """Send the .torrent file for each of the best links (from public caches)."""
-    label, results = await find_links(media_type, tmdb_id, season, episode)
+    label, results, _ = await find_links(media_type, tmdb_id, season, episode)
     best = pick_best(results, 5, max_size(season, episode))
     if not best:
         await context.bot.send_message(chat_id, "No links to send.")
@@ -588,7 +623,7 @@ async def send_torrent_files(chat_id, context, media_type, tmdb_id, season, epis
 
 
 async def send_magnet_text(chat_id, context, media_type, tmdb_id, season, episode):
-    label, results = await find_links(media_type, tmdb_id, season, episode)
+    label, results, _ = await find_links(media_type, tmdb_id, season, episode)
     best = pick_best(results, 5, max_size(season, episode))
     if not best:
         await context.bot.send_message(chat_id, "No links to copy.")
@@ -608,30 +643,38 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action = parts[0]
 
     try:
-        if action == "t":                      # picked a search result
+        back = lambda n: parts[n] if len(parts) > n else ""
+        if action == "t":                      # open a title page (in place)
             await query.answer()
-            await show_title(chat_id, context, parts[1], int(parts[2]))
+            await open_title(context, chat_id, parts[1], int(parts[2]), back(3), message=query.message)
 
-        elif action == "tr":                   # /trending tab switch
-            await switch_trending_tab(query, parts[1])
+        elif action == "q":                    # back to a search result list
+            page = list_page(context, parts[1])
+            if not page:
+                await query.answer("That list has expired — send the name again.", show_alert=True)
+                return
+            await query.answer()
+            await show_page(context, chat_id, page[1], page[0], page[2], query.message)
+
+        elif action == "tr":                   # /trending tab switch (also "back to trending")
+            await switch_trending_tab(query, context, parts[1])
 
         elif action == "tr_new":               # "What's trending" button on the welcome message
             await query.answer()
             await trending(update, context)
 
-        elif action == "s":                    # picked a season
+        elif action == "s":                    # season -> episode picker (in place)
             await query.answer()
-            await show_episode_picker(query, int(parts[1]), int(parts[2]))
+            await open_episodes(context, chat_id, int(parts[1]), int(parts[2]), back(3), message=query.message)
 
-        elif action == "ss":                   # back to seasons
+        elif action == "ss":                   # old "« Seasons" buttons
             await query.answer()
-            data = await tmdb(f"/tv/{parts[1]}") or {}
-            await send_season_picker(chat_id, context, int(parts[1]), data, message=query.message)
+            await open_title(context, chat_id, "tv", int(parts[1]), message=query.message)
 
-        elif action == "l":                    # links for movie / season / episode
+        elif action == "l":                    # links page for movie / season / episode (in place)
             await query.answer("Searching…")
-            await send_links(chat_id, context, parts[1], int(parts[2]), int(parts[3]), int(parts[4]),
-                             message=query.message)
+            await open_links(context, chat_id, parts[1], int(parts[2]), int(parts[3]), int(parts[4]),
+                             back(5), message=query.message)
 
         elif action == "m":                    # copy magnets as text
             await query.answer()
