@@ -707,10 +707,21 @@ async def admin_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
+async def website(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    url = SITE_URL or "https://streambreaker.netlify.app"
+    await update.message.reply_text(
+        "🌐 <b>StreamBreaker website</b>\nBrowse movies and series, watch trailers, see where to stream, "
+        "and get download links.\n\nYou can also tap the <b>🌐 Website</b> button next to the message box.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Open the website", url=url)]]),
+    )
+
+
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = ("Send me a movie or series name to get download links.\n"
             "For one episode: <code>game of thrones s1e1</code>\n\n"
             "/trending — what's popular this week (movies, series, Kannada, Hindi)\n"
+            "/website — open the website\n"
             "/recommend &lt;what you like&gt; — AI suggestions")
     if update.effective_user.id == ADMIN_ID:
         text += "\n\n<b>Admin</b>\n/stats — numbers\n/requests — pending requests"
@@ -751,6 +762,7 @@ async def set_command_menu(app):
     """The list Telegram shows when users type "/"."""
     await app.bot.set_my_commands([
         BotCommand("trending", "What's trending this week"),
+        BotCommand("website", "Open the StreamBreaker website"),
         BotCommand("recommend", "AI suggestions, e.g. /recommend movies like Inception"),
         BotCommand("help", "How to use the bot"),
     ])
@@ -760,6 +772,7 @@ def build_application():
     application = ApplicationBuilder().token(BOT_TOKEN).post_init(set_command_menu).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("trending", trending))
+    application.add_handler(CommandHandler("website", website))
     application.add_handler(CommandHandler("help", help_cmd))
     application.add_handler(CommandHandler("recommend", recommend))
     application.add_handler(CommandHandler("stats", admin_stats))
