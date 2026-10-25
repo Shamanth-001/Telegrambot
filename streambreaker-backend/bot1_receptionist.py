@@ -623,5 +623,7 @@ def build_application():
 application = build_application() if BOT_TOKEN else None
 
 if __name__ == "__main__":
+    # Python 3.14 no longer creates a default event loop; python-telegram-bot 21 expects one
+    asyncio.set_event_loop(asyncio.new_event_loop())
     print("✅ StreamBreaker bot is running")
     application.run_polling(drop_pending_updates=True)
