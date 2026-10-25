@@ -26,6 +26,7 @@ runs on the PC with Radarr/Sonarr) pulls requests from here and pushes uploaded 
 | `CHANNEL_ID` | yes | Private storage channel, e.g. `-100…`. `@StreamBreakerBot` must be an admin of it |
 | `SYNC_SECRET` | yes | Shared secret with the local worker (same value in both `.env` files) |
 | `SITE_URL` | yes | Frontend URL, e.g. `https://streambreaker.netlify.app` (bot "Open on website" buttons) |
+| `DATABASE_URL` | recommended | Supabase Postgres **Session pooler** URI (see below). Without it, data lives in SQLite and is wiped on every Render redeploy |
 | `API_PUBLIC_URL` | no | This service's public URL (default `https://telegrambot-p8yg.onrender.com`) |
 | `BOT_USERNAME` | no | Bot username for website deep links (default `StreamBreakerBot`) |
 | `WATCH_REGION` | no | Country for "Where to watch legally" (default `IN`) |
@@ -33,9 +34,23 @@ runs on the PC with Radarr/Sonarr) pulls requests from here and pushes uploaded 
 | `NVIDIA_API_KEY`, `NVIDIA_MODEL` | no | Optional NVIDIA model for `/recommend` |
 | `RUN_BOT` | no | `0` runs the API without the bot |
 
-Render's free disk is wiped on every deploy/restart. The worker re-uploads the library index
-every 30 minutes, so library lookups recover on their own; requests that were still waiting
-when the disk was wiped have to be sent again.
+### Database (Supabase, free)
+
+Render's free disk is wiped on every deploy/restart, so keep the data in Supabase:
+
+1. Supabase dashboard → your project → **Connect** → **Session pooler** → copy the URI. It looks like
+   `postgresql://postgres.<project-ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres`.
+   Use the *pooler* URI: the "direct connection" host is IPv6-only, which Render can't reach.
+2. Replace `[YOUR-PASSWORD]` with the database password (Project Settings → Database → reset it if
+   you don't know it).
+3. Render → Environment → add `DATABASE_URL` with that URI → Save (Render redeploys).
+4. `https://<your-render-url>/api/health` should show `"db": "ok"`. Tables are created automatically.
+
+### Keep it awake (free)
+
+Free Render services sleep after 15 minutes without traffic, which also pauses the bot. Create a
+free job at [cron-job.org](https://cron-job.org) that opens `/api/health` every 10 minutes. This
+also counts as activity for Supabase, which pauses free projects after a week without any.
 
 ## Running locally
 
