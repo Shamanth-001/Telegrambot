@@ -1,6 +1,6 @@
 """
-ai.py — Movie/series recommendations from an LLM (NVIDIA if configured, then a rotated
-Gemini key pool). Shared by the API (/api/ai) and the bot (/recommend); no web framework needed.
+ai.py — Movie/series recommendations from Gemini (a rotated key pool).
+Shared by the API (/api/ai) and the bot (/recommend); no web framework needed.
 """
 import json
 import logging
@@ -23,25 +23,7 @@ async def ask(prompt: str) -> str:
     prompt = f"{prompt}\n\nIMPORTANT: You must write the response strictly in English language."
 
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
-        # 1. NVIDIA (optional)
-        nvidia_key = os.getenv("NVIDIA_API_KEY", "").strip()
-        if nvidia_key:
-            try:
-                async with session.post(
-                    "https://integrate.api.nvidia.com/v1/chat/completions",
-                    json={"model": os.getenv("NVIDIA_MODEL", "nvidia/nemotron-3-ultra-550b-a55b"),
-                          "messages": [{"role": "user", "content": prompt}],
-                          "temperature": 1, "top_p": 0.95, "max_tokens": 4096},
-                    headers={"Authorization": f"Bearer {nvidia_key}"},
-                ) as resp:
-                    if resp.status == 200:
-                        text = ((await resp.json()).get("choices") or [{}])[0].get("message", {}).get("content", "").strip()
-                        if text:
-                            return text
-            except Exception as e:
-                logging.warning(f"[NVIDIA] {e}")
-
-        # 2. Gemini key pool
+        # Gemini key pool
         if not GEMINI_KEYS:
             return "AI is not configured."
         last_error = ""

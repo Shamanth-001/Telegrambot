@@ -31,7 +31,6 @@ runs on the PC with Radarr/Sonarr) pulls requests from here and pushes uploaded 
 | `BOT_USERNAME` | no | Bot username for website deep links (default `StreamBreakerBot`) |
 | `WATCH_REGION` | no | Country for "Where to watch legally" (default `IN`) |
 | `GEMINI_API_KEYS` | no | Comma-separated Gemini keys for `/recommend` |
-| `NVIDIA_API_KEY`, `NVIDIA_MODEL` | no | Optional NVIDIA model for `/recommend` |
 | `RUN_BOT` | no | `0` runs the API without the bot |
 
 ### Database (Supabase, free)
