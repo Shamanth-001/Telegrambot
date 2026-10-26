@@ -133,7 +133,28 @@ export const api = {
       `/torrents/search${qs({ tmdb_id: id, media_type: type, season, episode })}`,
       signal,
     ),
+  feedback: async (body: FeedbackBody) => {
+    const res = await fetch('/api/feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new ApiError(data.error || `Request failed (${res.status})`, res.status);
+    }
+  },
 };
+
+export type FeedbackKind = 'idea' | 'bug' | 'request' | 'other';
+
+export interface FeedbackBody {
+  kind: FeedbackKind;
+  message: string;
+  contact?: string;
+  page?: string;
+  website?: string; // honeypot
+}
 
 /** Languages offered as filters (TMDB original_language codes). */
 export const LANGUAGES = [

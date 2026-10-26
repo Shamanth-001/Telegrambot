@@ -1,8 +1,9 @@
-import { Link } from 'react-router-dom';
+import { Link, useLocation } from 'react-router-dom';
 import { Send } from 'lucide-react';
 import { Logo } from './Navbar';
 
 export default function Footer() {
+  const { pathname } = useLocation();
   return (
     <footer className="mt-16 border-t border-line pb-24 pt-10 md:pb-10">
       <div className="mx-auto flex max-w-[1600px] flex-col gap-6 px-4 sm:px-8 md:flex-row md:items-start md:justify-between">
@@ -17,6 +18,9 @@ export default function Footer() {
           <Link to="/movies" className="hover:text-ink">Movies</Link>
           <Link to="/series" className="hover:text-ink">Series</Link>
           <Link to="/watchlist" className="hover:text-ink">My List</Link>
+          <Link to="/feedback" state={pathname === '/feedback' ? undefined : { from: pathname }} className="hover:text-ink">
+            Feedback
+          </Link>
           <a href="https://t.me/StreamBreakerBot" target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 hover:text-ink">
             <Send className="h-4 w-4" /> Telegram bot
           </a>

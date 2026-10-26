@@ -451,6 +451,53 @@ async def ask_ai_endpoint(request: Request):
 
 
 # ============================================================
+# Feedback form -> sent to the admin on Telegram
+# ============================================================
+
+FEEDBACK_KINDS = {"idea": "💡 Idea", "bug": "🐞 Bug", "request": "🎬 Request", "other": "💬 Other"}
+_feedback_times: dict[str, list[float]] = {}
+
+
+@app.post("/api/feedback")
+async def feedback(request: Request):
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid request"}, status_code=400)
+    if data.get("website"):  # honeypot field, only bots fill it
+        return {"status": "ok"}
+    message = str(data.get("message") or "").strip()[:2000]
+    if len(message) < 3:
+        return JSONResponse({"error": "Please write a message"}, status_code=400)
+
+    # At most 5 messages per 10 minutes from one address
+    ip = (request.headers.get("x-forwarded-for") or (request.client.host if request.client else "")).split(",")[0].strip()
+    now = time.time()
+    recent = [t for t in _feedback_times.get(ip, []) if now - t < 600]
+    if len(recent) >= 5:
+        return JSONResponse({"error": "Too many messages, try again in a few minutes"}, status_code=429)
+    _feedback_times[ip] = recent + [now]
+    if len(_feedback_times) > 5000:
+        _feedback_times.clear()
+
+    admin_id = os.getenv("ADMIN_USER_ID")
+    kind = FEEDBACK_KINDS.get(data.get("kind"), FEEDBACK_KINDS["other"])
+    contact = str(data.get("contact") or "").strip()[:200]
+    page = str(data.get("page") or "").strip()[:300]
+    text = f"📝 <b>Website feedback</b> · {kind}\n\n{html.escape(message)}"
+    if contact:
+        text += f"\n\n<b>Contact:</b> {html.escape(contact)}"
+    if page:
+        text += f"\n<b>Page:</b> {html.escape(page)}"
+    r = await bot_api("sendMessage", chat_id=admin_id, text=text, parse_mode="HTML",
+                      disable_web_page_preview=True) if admin_id else {"ok": False}
+    if not r.get("ok"):
+        logging.warning(f"Feedback not delivered: {message[:200]!r}")
+        return JSONResponse({"error": "Couldn't send feedback right now"}, status_code=502)
+    return {"status": "ok"}
+
+
+# ============================================================
 # Sync with the local download worker (Radarr/Sonarr -> Telegram channel)
 #
 #   GET  /api/sync/requests            open requests for the worker to fetch

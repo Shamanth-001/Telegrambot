@@ -7,6 +7,7 @@ import Home from './screens/Home';
 import { Catalogue, SearchPage } from './screens/Browse';
 import TitlePage from './screens/TitlePage';
 import MyList from './screens/MyList';
+import Feedback from './screens/Feedback';
 
 // Old links: /movie/:id?type=tv  ->  /title/tv/:id
 function LegacyTitle() {
@@ -63,6 +64,7 @@ export default function App() {
           <Route path="/search" element={<SearchPage />} />
           <Route path="/title/:type/:id" element={<TitlePage />} />
           <Route path="/watchlist" element={<MyList />} />
+          <Route path="/feedback" element={<Feedback />} />
           <Route path="/movie/:id" element={<LegacyTitle />} />
           <Route path="/browse" element={<LegacyBrowse />} />
           <Route path="/login" element={<Navigate to="/" replace />} />
