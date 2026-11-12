@@ -30,6 +30,11 @@ iframe{position:absolute;inset:0;width:100%;height:100%;border:0}
 .hint{color:var(--muted);font-size:13px}
 .toast{position:absolute;left:50%;bottom:16px;transform:translateX(-50%);background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:10px 14px;font-size:13px;color:var(--muted);display:none;gap:10px;align-items:center;z-index:3;width:max-content;max-width:calc(100% - 32px)}
 .toast.show{display:flex}
+.tip{position:absolute;left:50%;top:32px;transform:translateX(-50%);background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:8px 8px 8px 12px;font-size:12px;color:var(--muted);display:none;gap:8px;align-items:center;z-index:3;width:max-content;max-width:calc(100% - 32px)}
+.tip.show{display:flex}
+.tip b{color:var(--ink)}
+.tip button{background:none;border:0;color:var(--dim);font-size:16px;line-height:1;padding:2px 6px;cursor:pointer}
+.sheet .note{font-size:12px;color:var(--dim);margin-top:10px;line-height:1.5}
 .modal{position:fixed;inset:0;background:rgba(0,0,0,.8);display:none;align-items:center;justify-content:center;z-index:20;padding:16px}
 .modal.open{display:flex}
 .sheet{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:16px;width:100%;max-width:340px}
@@ -61,12 +66,14 @@ iframe{position:absolute;inset:0;width:100%;height:100%;border:0}
 <div class="stage">
   <button class="show-bar" id="showBar" type="button">▾ Show controls</button>
   <div class="overlay" id="overlay"><div class="spin"></div><div class="hint" id="status">Loading player…</div></div>
+  <div class="tip" id="adTip"><span>Seeing ads? Try the <b>Brave</b> browser, or set Private DNS to <b>dns.adguard-dns.com</b> in Android settings.</span><button type="button" id="adTipClose" aria-label="Dismiss">×</button></div>
   <div class="toast" id="toast"><span id="toastText">Not loading?</span> <button class="btn accent" id="tryNext" type="button">Try next server</button></div>
 </div>
 <div class="modal" id="modal">
   <div class="sheet">
     <h3>Choose a server</h3>
     <div id="opts"></div>
+    <p class="note">Ads come from the servers, not StreamBreaker. To block most of them, use the Brave browser or Firefox with uBlock Origin, or on Android set Private DNS to dns.adguard-dns.com.</p>
     <button class="btn" style="width:100%;justify-content:center;margin-top:8px" id="closeModal" type="button">Close</button>
   </div>
 </div>
@@ -166,8 +173,22 @@ iframe{position:absolute;inset:0;width:100%;height:100%;border:0}
     $('srvName').textContent = srv.n;
     $('srvBadge').textContent = srv.sandbox ? 'No pop-ups' : 'May show ads';
     $('srvBadge').className = 'badge ' + (srv.sandbox ? 'safe' : 'ads');
+    if (!srv.sandbox) showAdTip();
     render();
   }
+
+  // Shown on servers that may show ads, until the viewer dismisses it once
+  var adTipTimer = null;
+  function showAdTip() {
+    try { if (localStorage.getItem('sb.adtip.closed')) return; } catch (x) {}
+    $('adTip').classList.add('show');
+    clearTimeout(adTipTimer);
+    adTipTimer = setTimeout(function () { $('adTip').classList.remove('show'); }, 12000);
+  }
+  $('adTipClose').onclick = function () {
+    $('adTip').classList.remove('show');
+    try { localStorage.setItem('sb.adtip.closed', '1'); } catch (x) {}
+  };
 
   function reset() {
     probes.forEach(function (p) { p.frame.remove(); });
