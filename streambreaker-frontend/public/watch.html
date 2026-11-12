@@ -28,7 +28,7 @@ iframe{position:absolute;inset:0;width:100%;height:100%;border:0}
 .spin{width:34px;height:34px;border:3px solid rgba(200,245,66,.2);border-top-color:var(--accent);border-radius:50%;animation:s .8s linear infinite}
 @keyframes s{to{transform:rotate(360deg)}}
 .hint{color:var(--muted);font-size:13px}
-.toast{position:absolute;left:50%;bottom:16px;transform:translateX(-50%);background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:10px 14px;font-size:13px;color:var(--muted);display:none;gap:10px;align-items:center;z-index:3;max-width:calc(100% - 32px)}
+.toast{position:absolute;left:50%;bottom:16px;transform:translateX(-50%);background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:10px 14px;font-size:13px;color:var(--muted);display:none;gap:10px;align-items:center;z-index:3;width:max-content;max-width:calc(100% - 32px)}
 .toast.show{display:flex}
 .modal{position:fixed;inset:0;background:rgba(0,0,0,.8);display:none;align-items:center;justify-content:center;z-index:20;padding:16px}
 .modal.open{display:flex}
@@ -80,20 +80,29 @@ iframe{position:absolute;inset:0;width:100%;height:100%;border:0}
   var e = Math.max(1, parseInt(P.get('e') || '1', 10) || 1);
 
   // sandbox: true  -> loaded in a sandboxed iframe: the player cannot redirect this page or open
-  //                   ad tabs. Only some providers allow this (tested: VidZee, VidSrc PM).
+  //                   ad tabs. Only some providers allow this (tested Nov 2026: only VidZee).
   // sandbox: false -> providers that refuse to play when sandboxed; they may open ad tabs.
+  // check(msg)     -> for providers that postMessage their state: 'ok' once the title plays or
+  //                   loads, 'missing' when they report not having it. Used to pick a server
+  //                   automatically; providers without it never say whether they have the title.
+  function playing(m) { return m.type === 'PLAYER_EVENT' && m.data && String(m.data.tmdbId) === String(id); }
+  function hasMedia(m) { return m.type === 'MEDIA_DATA' && m.data && !!m.data[id]; }
   var SERVERS = [
     { n: 'VidZee', d: 'Blocks pop-ups and redirects', sandbox: true,
+      check: function (m) { return playing(m) ? 'ok' : undefined; },
       u: function () { return type === 'tv' ? 'https://player.vidzee.wtf/embed/tv/' + id + '/' + s + '/' + e : 'https://player.vidzee.wtf/embed/movie/' + id; } },
-    { n: 'VidSrc PM', d: 'Blocks pop-ups and redirects', sandbox: true,
+    { n: 'VidSrc PM', d: 'Large library', sandbox: false,
       u: function () { return type === 'tv' ? 'https://vidsrc.pm/embed/tv/' + id + '/' + s + '/' + e : 'https://vidsrc.pm/embed/movie/' + id; } },
     { n: 'VidSrc', d: 'Large library', sandbox: false,
       u: function () { return type === 'tv' ? 'https://vidsrc.to/embed/tv/' + id + '/' + s + '/' + e : 'https://vidsrc.to/embed/movie/' + id; } },
     { n: 'VidLink', d: 'Fast HD', sandbox: false,
+      check: function (m) { return playing(m) || hasMedia(m) ? 'ok' : undefined; },
       u: function () { return type === 'tv' ? 'https://vidlink.pro/tv/' + id + '/' + s + '/' + e : 'https://vidlink.pro/movie/' + id; } },
-    { n: 'Videasy', d: 'Multiple qualities', sandbox: false,
-      u: function () { return type === 'tv' ? 'https://player.videasy.net/tv/' + id + '/' + s + '/' + e : 'https://player.videasy.net/movie/' + id; } },
     { n: 'VidFast', d: 'Backup', sandbox: false,
+      check: function (m) {
+        if (m.event === 'status' && m.data === 404) return 'missing';
+        return playing(m) || hasMedia(m) ? 'ok' : undefined;
+      },
       u: function () { return type === 'tv' ? 'https://vidfast.pro/tv/' + id + '/' + s + '/' + e : 'https://vidfast.pro/movie/' + id; } },
     { n: '2Embed', d: 'Backup', sandbox: false,
       u: function () { return type === 'tv' ? 'https://www.2embed.cc/embedtv/' + id + '&s=' + s + '&e=' + e : 'https://www.2embed.cc/embed/' + id; } }
@@ -103,7 +112,7 @@ iframe{position:absolute;inset:0;width:100%;height:100%;border:0}
   var $ = function (x) { return document.getElementById(x); };
   var stage = document.querySelector('.stage'), overlay = $('overlay'), toast = $('toast'), bar = $('bar');
   var player = null, current = 0, slowTimer = null, hideTimer = null, leaving = false, loaded = false;
-  try { current = Math.min(SERVERS.length - 1, parseInt(localStorage.getItem('sb.server.v2') || '0', 10) || 0); } catch (x) {}
+  var probes = [], autoTimer = null, manual = false;
 
   // While an unsandboxed player is active, ask before anything navigates this page away
   // (that's how ad redirects hijack the tab). Our own links set `leaving` first.
@@ -130,25 +139,17 @@ iframe{position:absolute;inset:0;width:100%;height:100%;border:0}
 
   function makeFrame(srv) {
     // A new element each time: the sandbox attribute only applies to fresh frames
-    if (player) player.remove();
-    player = document.createElement('iframe');
-    player.allowFullscreen = true;
-    player.setAttribute('allow', 'autoplay; fullscreen; picture-in-picture; encrypted-media');
-    player.setAttribute('referrerpolicy', 'origin');
-    if (srv.sandbox) player.setAttribute('sandbox', SANDBOX);
-    player.addEventListener('load', function () { loaded = true; setTimeout(function () { overlay.classList.add('done'); }, 500); });
-    player.src = srv.u();
-    stage.appendChild(player);
+    var f = document.createElement('iframe');
+    f.allowFullscreen = true;
+    f.setAttribute('allow', 'autoplay; fullscreen; picture-in-picture; encrypted-media');
+    f.setAttribute('referrerpolicy', 'origin');
+    if (srv.sandbox) f.setAttribute('sandbox', SANDBOX);
+    f.src = srv.u();
+    stage.appendChild(f);
+    return f;
   }
 
-  function load(i) {
-    current = i;
-    leaving = false;
-    try { localStorage.setItem('sb.server.v2', String(i)); } catch (x) {}
-    var srv = SERVERS[i];
-    $('srvName').textContent = srv.n;
-    $('srvBadge').textContent = srv.sandbox ? 'No pop-ups' : 'May show ads';
-    $('srvBadge').className = 'badge ' + (srv.sandbox ? 'safe' : 'ads');
+  function showTitle() {
     $('title').innerHTML = '';
     $('title').appendChild(document.createTextNode(name || 'Now playing'));
     if (type === 'tv') {
@@ -157,36 +158,114 @@ iframe{position:absolute;inset:0;width:100%;height:100%;border:0}
       $('title').appendChild(sm);
     }
     document.title = label() + ' · StreamBreaker';
-    $('status').textContent = 'Loading ' + srv.n + '…';
+  }
+
+  function showServer(i) {
+    current = i;
+    var srv = SERVERS[i];
+    $('srvName').textContent = srv.n;
+    $('srvBadge').textContent = srv.sandbox ? 'No pop-ups' : 'May show ads';
+    $('srvBadge').className = 'badge ' + (srv.sandbox ? 'safe' : 'ads');
+    render();
+  }
+
+  function reset() {
+    probes.forEach(function (p) { p.frame.remove(); });
+    probes = [];
+    clearTimeout(autoTimer);
+    clearTimeout(slowTimer);
+    if (player) player.remove();
+    player = null;
+    leaving = false;
+    showTitle();
     overlay.classList.remove('done');
     toast.classList.remove('show');
+  }
+
+  function load(i, note) {
+    reset();
+    showServer(i);
+    $('status').textContent = 'Loading ' + SERVERS[i].n + '…';
     loaded = false;
-    makeFrame(srv);
-    clearTimeout(slowTimer);
+    player = makeFrame(SERVERS[i]);
+    player.addEventListener('load', function () { loaded = true; setTimeout(function () { overlay.classList.add('done'); }, 500); });
     // Never leave the spinner over the player for long, even if the embed never fires "load"
     setTimeout(function () { overlay.classList.add('done'); }, 5000);
     slowTimer = setTimeout(function () {
-      $('toastText').textContent = loaded ? 'Not playing? This title may be missing here.' : 'Not loading?';
+      $('toastText').textContent = note || (loaded ? 'Not playing? This title may be missing here.' : 'Not loading?');
       toast.classList.add('show');
       setTimeout(function () { toast.classList.remove('show'); }, 10000);
-    }, 15000);
+    }, note ? 3000 : 15000);
+  }
+
+  // Auto: load every server that reports its state at once (hidden) and show the first one
+  // that has the title. If none confirms in time, fall back to the first silent server.
+  function auto() {
+    reset();
+    manual = false;
+    $('srvName').textContent = 'Auto';
+    $('srvBadge').textContent = '';
+    $('srvBadge').className = 'badge';
+    $('status').textContent = 'Finding a server that has this ' + (type === 'tv' ? 'episode' : 'movie') + '…';
+    SERVERS.forEach(function (srv, i) {
+      if (!srv.check) return;
+      var f = makeFrame(srv);
+      f.style.visibility = 'hidden';
+      probes.push({ i: i, frame: f });
+    });
+    autoTimer = setTimeout(giveUp, 15000);
     render();
   }
+
+  function giveUp() {
+    var i = SERVERS.findIndex(function (srv) { return !srv.check; });
+    load(i, "Couldn't confirm a server for this title. Not playing?");
+  }
+
+  window.addEventListener('message', function (ev) {
+    var p = probes.filter(function (x) { return x.frame.contentWindow === ev.source; })[0];
+    if (!p) return;
+    var m = ev.data;
+    if (typeof m === 'string') { try { m = JSON.parse(m); } catch (x) { return; } }
+    if (!m || typeof m !== 'object') return;
+    var result = SERVERS[p.i].check(m);
+    if (result === 'ok') {
+      clearTimeout(autoTimer);
+      probes.forEach(function (x) { if (x !== p) x.frame.remove(); });
+      probes = [];
+      player = p.frame;
+      player.style.visibility = '';
+      loaded = true;
+      showServer(p.i);
+      overlay.classList.add('done');
+    } else if (result === 'missing') {
+      p.frame.remove();
+      probes.splice(probes.indexOf(p), 1);
+      if (!probes.length) giveUp();
+    }
+  });
 
   function render() {
     var box = $('opts');
     box.innerHTML = '';
+    var a = document.createElement('button');
+    a.type = 'button';
+    a.className = 'opt' + (manual ? '' : ' on');
+    a.innerHTML = '<span><b></b><br><span>Picks the first server that has this title</span></span>';
+    a.querySelector('b').textContent = 'Auto' + (manual ? '' : ' ✓');
+    a.onclick = function () { close(); auto(); };
+    box.appendChild(a);
     SERVERS.forEach(function (srv, i) {
       var b = document.createElement('button');
       b.type = 'button';
-      b.className = 'opt' + (i === current ? ' on' : '');
+      b.className = 'opt' + (manual && i === current ? ' on' : '');
       b.innerHTML = '<span><b></b><i></i><br><span></span></span>';
       var inner = b.firstChild;
-      inner.querySelector('b').textContent = srv.n + (i === current ? ' ✓' : '');
+      inner.querySelector('b').textContent = srv.n + (i === current && (manual || player) ? ' ✓' : '');
       inner.querySelector('i').textContent = srv.sandbox ? 'No pop-ups' : 'May show ads';
       inner.querySelector('i').className = srv.sandbox ? 'safe' : 'ads';
       inner.lastChild.textContent = srv.d;
-      b.onclick = function () { close(); load(i); };
+      b.onclick = function () { close(); manual = true; load(i); };
       box.appendChild(b);
     });
   }
@@ -196,14 +275,14 @@ iframe{position:absolute;inset:0;width:100%;height:100%;border:0}
   $('srvBtn').onclick = open;
   $('closeModal').onclick = close;
   $('modal').addEventListener('click', function (ev) { if (ev.target === this) close(); });
-  $('tryNext').onclick = function () { load((current + 1) % SERVERS.length); };
+  $('tryNext').onclick = function () { manual = true; load((current + 1) % SERVERS.length); };
 
   function setEp(ns, ne) {
     s = ns; e = ne;
     var q = new URLSearchParams(location.search);
     q.set('s', s); q.set('e', e);
     history.replaceState(null, '', '?' + q.toString());
-    load(current);
+    manual ? load(current) : auto();
   }
   if (type === 'tv') {
     // Episode counts per season, so Prev/Next can cross season boundaries
@@ -245,7 +324,7 @@ iframe{position:absolute;inset:0;width:100%;height:100%;border:0}
     $('srvBtn').disabled = true;
     return;
   }
-  load(current);
+  auto();
   showBar();
 })();
 </script>
